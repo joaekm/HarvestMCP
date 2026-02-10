@@ -52,6 +52,7 @@ python3 harvest_mcp.py
 | harvest_time_summary | Flexibel tidsrapport med filter (projekt, kund, person) |
 | harvest_list_projects | Lista projekt med ID (for filtrering) |
 | harvest_list_users | Lista anvandare med ID (for filtrering) |
+| harvest_detailed_time_entries | Detaljerade tidsposter med kommentarer/notes |
 | forecast_schedule | Vem ar schemalagd pa vilka projekt i Forecast |
 
 ## Config

@@ -665,6 +665,100 @@ def _count_work_days(start_date: str, end_date: str) -> int:
 
 
 # ======================================================================
+# TOOL 7: Detaljerade tidsposter (med kommentarer)
+# ======================================================================
+
+@mcp.tool()
+def harvest_detailed_time_entries(
+    from_date: str = "",
+    to_date: str = "",
+    project_id: str = "",
+    client_id: str = "",
+    user_id: str = ""
+) -> str:
+    """
+    Visa detaljerade tidsposter med kommentarer/notes.
+
+    Till skillnad fran harvest_time_summary (som visar aggregerade timmar)
+    visar detta verktyg varje enskild tidspost med datum, person, projekt,
+    task och kommentar. Perfekt for att granska vad folk faktiskt gjort
+    eller kontrollera att kommentarer finns.
+
+    Args:
+        from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
+        to_date: Slutdatum YYYY-MM-DD (default: idag)
+        project_id: Filtrera pa projekt-ID (valfritt)
+        client_id: Filtrera pa kund-ID (valfritt)
+        user_id: Filtrera pa person-ID (valfritt)
+    """
+    from_date, to_date = _resolve_dates(from_date, to_date)
+    client = _get_client()
+
+    filters = {}
+    if project_id:
+        filters['project_id'] = project_id
+    if client_id:
+        filters['client_id'] = client_id
+    if user_id:
+        filters['user_id'] = user_id
+
+    entries = client.get_time_entries(from_date, to_date, **filters)
+
+    if not entries:
+        return f"Inga tidsposter hittades for {from_date} \u2192 {to_date} med angivna filter."
+
+    # Sortera: nyast datum forst, sedan person
+    entries.sort(key=lambda e: (
+        e.get('spent_date', ''),
+        (e.get('user', {}) or {}).get('name', '')
+    ), reverse=True)
+
+    lines = [
+        f"## Detaljerade tidsposter: {from_date} \u2192 {to_date}",
+        f"*{len(entries)} poster*\n",
+        "| Datum | Person | Projekt | Task | Timmar | Kommentar |",
+        "|-------|--------|---------|------|--------|-----------|",
+    ]
+
+    total_hours = 0.0
+    missing_notes = 0
+
+    for e in entries:
+        date = e.get('spent_date', '')
+        user = e.get('user', {}) or {}
+        person = user.get('name', 'Unknown')
+        proj = e.get('project', {}) or {}
+        proj_name = proj.get('name', 'Unknown')
+        task = e.get('task', {}) or {}
+        task_name = task.get('name', '')
+        hours = e.get('hours', 0) or 0
+        notes = (e.get('notes') or '').strip()
+
+        total_hours += hours
+        if not notes:
+            missing_notes += 1
+
+        # Trunkera langa kommentarer for tabellformat
+        if len(notes) > 80:
+            notes = notes[:77] + '...'
+        # Escapea pipe-tecken i notes
+        notes = notes.replace('|', '\\|')
+
+        lines.append(
+            f"| {date} | {person} | {proj_name} | {task_name} | {hours:.1f}h | {notes} |"
+        )
+
+    lines.append("")
+    lines.append(f"**Totalt:** {total_hours:.1f}h | **Poster utan kommentar:** {missing_notes} av {len(entries)}")
+
+    logging.info(
+        f"harvest_detailed_time_entries: {from_date} -> {to_date}, "
+        f"{len(entries)} entries, {missing_notes} utan notes"
+    )
+    return '\n'.join(lines)
+
+
+# ======================================================================
 # Boilerplate
 # ======================================================================
 
