@@ -46,7 +46,7 @@ _root.addHandler(_fh)
 
 from mcp.server.fastmcp import FastMCP
 from harvest_auth import load_config
-from harvest_client import HarvestClient
+from harvest_client import HarvestClient, ForecastClient
 
 # Tysta tredjepartsloggers
 for _name in ['httpx', 'httpcore', 'mcp', 'anyio', 'urllib3', 'requests']:
@@ -62,8 +62,9 @@ except FileNotFoundError as e:
 # --- MCP SERVER ---
 mcp = FastMCP("HarvestReports")
 
-# Lazy-init client
+# Lazy-init clients
 _client = None
+_forecast_client = None
 
 
 def _get_client() -> HarvestClient:
@@ -73,6 +74,17 @@ def _get_client() -> HarvestClient:
         _client = HarvestClient(CONFIG['harvest'])
         logging.info("HarvestClient initialized")
     return _client
+
+
+def _get_forecast_client() -> ForecastClient:
+    """Lazy-initierad Forecast-klient."""
+    global _forecast_client
+    if _forecast_client is None:
+        if 'forecast' not in CONFIG:
+            raise RuntimeError("Forecast ej konfigurerad i config.yaml")
+        _forecast_client = ForecastClient(CONFIG['forecast'])
+        logging.info("ForecastClient initialized")
+    return _forecast_client
 
 
 def _resolve_dates(from_date: str, to_date: str) -> tuple[str, str]:
@@ -483,6 +495,173 @@ def harvest_list_users(active_only: bool = True) -> str:
 
     logging.info(f"harvest_list_users: {len(users)} anvandare")
     return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 6: Forecast - Vem är schemalagd var
+# ======================================================================
+
+@mcp.tool()
+def forecast_schedule(
+    start_date: str = "",
+    end_date: str = "",
+    group_by: str = "person"
+) -> str:
+    """
+    Visa vem som ar schemalagd pa vilka projekt i Forecast.
+
+    Visar planerad allokering (timmar/dag) for varje person och projekt.
+    Forecast ar ett resursplaneringsverktyg kopplat till Harvest.
+
+    Args:
+        start_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
+        end_date: Slutdatum YYYY-MM-DD (default: fredagen denna vecka)
+        group_by: "person" (vilka projekt per person) eller "project" (vilka personer per projekt)
+    """
+    today = datetime.now().date()
+    if not start_date:
+        monday = today - timedelta(days=today.weekday())
+        start_date = monday.isoformat()
+    if not end_date:
+        monday = today - timedelta(days=today.weekday())
+        friday = monday + timedelta(days=4)
+        end_date = friday.isoformat()
+
+    fc = _get_forecast_client()
+
+    assignments = fc.get_assignments(start_date, end_date)
+    people = fc.get_people()
+    projects = fc.get_projects()
+
+    # Lookup-tabeller
+    people_map = {p['id']: p for p in people}
+    project_map = {p['id']: p for p in projects}
+
+    if group_by == "project":
+        return _format_forecast_by_project(
+            assignments, people_map, project_map, start_date, end_date
+        )
+    else:
+        return _format_forecast_by_person(
+            assignments, people_map, project_map, start_date, end_date
+        )
+
+
+def _format_forecast_by_person(
+    assignments: list, people_map: dict, project_map: dict,
+    start_date: str, end_date: str
+) -> str:
+    """Gruppera Forecast-assignments per person."""
+    persons = defaultdict(lambda: {'projects': defaultdict(float), 'total': 0.0})
+
+    for a in assignments:
+        person_id = a.get('person_id')
+        project_id = a.get('project_id')
+        if not person_id or not project_id:
+            continue
+
+        person = people_map.get(person_id)
+        project = project_map.get(project_id)
+        if not person or not project:
+            continue
+
+        person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}".strip()
+        project_name = project.get('name', 'Unknown')
+
+        # allocation i sekunder per dag -> timmar totalt
+        alloc_seconds = a.get('allocation', 0) or 0
+        alloc_hours_per_day = alloc_seconds / 3600.0
+
+        # Räkna arbetsdagar i assignmentets period (begränsat till sökt intervall)
+        a_start = max(a.get('start_date', start_date), start_date)
+        a_end = min(a.get('end_date', end_date), end_date)
+        work_days = _count_work_days(a_start, a_end)
+        total_hours = alloc_hours_per_day * work_days
+
+        persons[person_name]['projects'][project_name] += total_hours
+        persons[person_name]['total'] += total_hours
+
+    sorted_persons = sorted(persons.items(), key=lambda x: x[1]['total'], reverse=True)
+
+    lines = [f"## Forecast: {start_date} → {end_date}\n"]
+
+    for person_name, data in sorted_persons:
+        lines.append(f"### {person_name} — {data['total']:.1f}h planerat")
+        lines.append("| Projekt | Timmar |")
+        lines.append("|---------|--------|")
+        for proj, hours in sorted(data['projects'].items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"| {proj} | {hours:.1f}h |")
+        lines.append("")
+
+    if not sorted_persons:
+        lines.append("Inga assignments hittades for perioden.")
+
+    logging.info(f"forecast_schedule(person): {start_date} -> {end_date}, {len(sorted_persons)} personer")
+    return '\n'.join(lines)
+
+
+def _format_forecast_by_project(
+    assignments: list, people_map: dict, project_map: dict,
+    start_date: str, end_date: str
+) -> str:
+    """Gruppera Forecast-assignments per projekt."""
+    projects = defaultdict(lambda: {'persons': defaultdict(float), 'total': 0.0})
+
+    for a in assignments:
+        person_id = a.get('person_id')
+        project_id = a.get('project_id')
+        if not person_id or not project_id:
+            continue
+
+        person = people_map.get(person_id)
+        project = project_map.get(project_id)
+        if not person or not project:
+            continue
+
+        person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}".strip()
+        project_name = project.get('name', 'Unknown')
+
+        alloc_seconds = a.get('allocation', 0) or 0
+        alloc_hours_per_day = alloc_seconds / 3600.0
+
+        a_start = max(a.get('start_date', start_date), start_date)
+        a_end = min(a.get('end_date', end_date), end_date)
+        work_days = _count_work_days(a_start, a_end)
+        total_hours = alloc_hours_per_day * work_days
+
+        projects[project_name]['persons'][person_name] += total_hours
+        projects[project_name]['total'] += total_hours
+
+    sorted_projects = sorted(projects.items(), key=lambda x: x[1]['total'], reverse=True)
+
+    lines = [f"## Forecast per projekt: {start_date} → {end_date}\n"]
+
+    for proj_name, data in sorted_projects:
+        lines.append(f"### {proj_name} — {data['total']:.1f}h planerat")
+        lines.append("| Person | Timmar |")
+        lines.append("|--------|--------|")
+        for person, hours in sorted(data['persons'].items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"| {person} | {hours:.1f}h |")
+        lines.append("")
+
+    if not sorted_projects:
+        lines.append("Inga assignments hittades for perioden.")
+
+    logging.info(f"forecast_schedule(project): {start_date} -> {end_date}, {len(sorted_projects)} projekt")
+    return '\n'.join(lines)
+
+
+def _count_work_days(start_date: str, end_date: str) -> int:
+    """Räkna arbetsdagar (mån-fre) i ett intervall."""
+    d1 = datetime.strptime(start_date, '%Y-%m-%d').date()
+    d2 = datetime.strptime(end_date, '%Y-%m-%d').date()
+    count = 0
+    current = d1
+    while current <= d2:
+        if current.weekday() < 5:
+            count += 1
+        current += timedelta(days=1)
+    return count
 
 
 # ======================================================================

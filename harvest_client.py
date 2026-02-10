@@ -161,23 +161,139 @@ class HarvestClient:
         return data.get('results', [])
 
 
+class ForecastClient:
+    """Klient för Forecast API (https://api.forecastapp.com).
+
+    Forecast API har ingen pagination — returnerar allt på en gång.
+    Använder Forecast-Account-Id header.
+    """
+
+    def __init__(self, forecast_config: dict):
+        self._config = forecast_config
+        self._base_url = forecast_config['api_base_url']
+        self._session = requests.Session()
+        self._ensure_auth()
+
+    def _ensure_auth(self) -> None:
+        """Hämta giltig token och sätt session-headers."""
+        token_data = get_valid_token(self._config)
+        self._token_data = token_data
+        self._session.headers.update({
+            'Authorization': f"Bearer {token_data['access_token']}",
+            'Forecast-Account-Id': token_data['account_id'],
+            'User-Agent': self._config.get('user_agent', 'HarvestMCP'),
+            'Content-Type': 'application/json',
+        })
+
+    def _request(self, method: str, path: str, params: dict = None) -> dict:
+        """HTTP-anrop med auth-refresh och rate limit-hantering."""
+        url = f"{self._base_url}{path}" if path.startswith('/') else path
+
+        resp = self._session.request(method, url, params=params)
+
+        if resp.status_code == 401:
+            log.info("Forecast 401 - refreshing token")
+            self._token_data = refresh_access_token(self._config, self._token_data)
+            self._session.headers['Authorization'] = f"Bearer {self._token_data['access_token']}"
+            resp = self._session.request(method, url, params=params)
+
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get('Retry-After', 16))
+            log.warning(f"Forecast rate limited, waiting {retry_after}s")
+            time.sleep(retry_after)
+            resp = self._session.request(method, url, params=params)
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Forecast API error: {resp.status_code} {method} {url} - {resp.text[:500]}"
+            )
+
+        return resp.json()
+
+    # ---- Convenience-metoder ----
+
+    def get_assignments(self, start_date: str = None, end_date: str = None) -> list:
+        """Hämta schemalagda assignments.
+
+        Args:
+            start_date: YYYY-MM-DD (default: idag)
+            end_date: YYYY-MM-DD (default: 4 veckor fram)
+        """
+        params = {}
+        if start_date:
+            params['start_date'] = start_date
+        if end_date:
+            params['end_date'] = end_date
+        data = self._request('GET', '/assignments', params=params)
+        return data.get('assignments', [])
+
+    def get_projects(self) -> list:
+        """Hämta alla Forecast-projekt."""
+        data = self._request('GET', '/projects')
+        return data.get('projects', [])
+
+    def get_people(self) -> list:
+        """Hämta alla personer i Forecast."""
+        data = self._request('GET', '/people')
+        return data.get('people', [])
+
+    def get_clients(self) -> list:
+        """Hämta alla kunder i Forecast."""
+        data = self._request('GET', '/clients')
+        return data.get('clients', [])
+
+    def get_milestones(self) -> list:
+        """Hämta alla milstolpar."""
+        data = self._request('GET', '/milestones')
+        return data.get('milestones', [])
+
+    def get_placeholders(self) -> list:
+        """Hämta alla placeholders (ej tillsatta roller)."""
+        data = self._request('GET', '/placeholders')
+        return data.get('placeholders', [])
+
+    def whoami(self) -> dict:
+        """Hämta info om autentiserad användare."""
+        return self._request('GET', '/whoami')
+
+
 # --- Standalone test ---
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     config = load_config()
+
+    # Harvest
     client = HarvestClient(config['harvest'])
 
-    print("\n--- Users ---")
+    print("\n--- Harvest Users ---")
     users = client.get_users()
     for u in users[:5]:
         cap_h = (u.get('weekly_capacity', 0) or 0) / 3600
         print(f"  {u['first_name']} {u['last_name']} - {cap_h}h/vecka")
     print(f"\nTotalt {len(users)} aktiva anvandare")
 
-    print("\n--- Projects ---")
+    print("\n--- Harvest Projects ---")
     projects = client.get_projects()
     for p in projects[:5]:
         client_name = p.get('client', {}).get('name', 'N/A') if p.get('client') else 'N/A'
         print(f"  {p['name']} ({client_name})")
     print(f"\nTotalt {len(projects)} aktiva projekt")
+
+    # Forecast (om konfigurerad och autentiserad)
+    if 'forecast' in config:
+        from harvest_auth import load_token
+        fc = config['forecast']
+        token = load_token(fc.get('token_path', ''))
+        if token:
+            print("\n--- Forecast ---")
+            fc_client = ForecastClient(fc)
+            info = fc_client.whoami()
+            print(f"  Inloggad som: {info.get('current_user', {}).get('email', 'unknown')}")
+            people = fc_client.get_people()
+            print(f"  {len(people)} personer i Forecast")
+            fc_projects = fc_client.get_projects()
+            print(f"  {len(fc_projects)} projekt i Forecast")
+        else:
+            print("\n--- Forecast ---")
+            print("  Ingen token. Kor: python3 harvest_auth.py forecast")

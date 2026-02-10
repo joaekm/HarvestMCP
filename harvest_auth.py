@@ -221,9 +221,19 @@ def get_valid_token(harvest_config: dict) -> dict:
 
 # --- Standalone: kör initial auth ---
 if __name__ == "__main__":
+    import sys
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     config = load_config()
-    harvest_config = config['harvest']
-    token = get_valid_token(harvest_config)
+
+    # python3 harvest_auth.py forecast  -> forecast-config
+    # python3 harvest_auth.py           -> harvest-config (default)
+    section = sys.argv[1] if len(sys.argv) > 1 else 'harvest'
+    if section not in config:
+        print(f"Okand sektion: '{section}'. Tillgangliga: {', '.join(config.keys())}")
+        sys.exit(1)
+
+    target_config = config[section]
+    print(f"\n--- Autentiserar mot: {section.upper()} ---")
+    token = get_valid_token(target_config)
     print(f"\nToken giltig. Account ID: {token['account_id']}")
-    print(f"Sparad i: {os.path.expanduser(harvest_config['token_path'])}")
+    print(f"Sparad i: {os.path.expanduser(target_config['token_path'])}")
