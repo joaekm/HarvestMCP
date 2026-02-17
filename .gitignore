@@ -3,7 +3,10 @@ __pycache__/
 .venv/
 venv/
 .env
+config.yaml
 token.json
+*.skill
+.DS_Store
 *.egg-info/
 dist/
 build/
