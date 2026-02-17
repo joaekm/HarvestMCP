@@ -19,6 +19,7 @@ import os
 import sys
 import signal
 import logging
+import uuid
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -66,6 +67,10 @@ mcp = FastMCP("HarvestReports")
 _client = None
 _forecast_client = None
 
+# --- Prepare/commit draft storage ---
+_drafts = {}  # draft_id → draft-objekt
+_DRAFT_TTL_MINUTES = 30
+
 
 def _get_client() -> HarvestClient:
     """Lazy-initierad Harvest-klient."""
@@ -85,6 +90,18 @@ def _get_forecast_client() -> ForecastClient:
         _forecast_client = ForecastClient(CONFIG['forecast'])
         logging.info("ForecastClient initialized")
     return _forecast_client
+
+
+def _cleanup_expired_drafts() -> None:
+    """Rensa drafts äldre än TTL."""
+    now = datetime.now()
+    expired = [
+        did for did, d in _drafts.items()
+        if (now - d['created_at']).total_seconds() > _DRAFT_TTL_MINUTES * 60
+    ]
+    for did in expired:
+        del _drafts[did]
+        logging.info(f"Draft {did} expired, removed")
 
 
 def _resolve_dates(from_date: str, to_date: str) -> tuple[str, str]:
@@ -756,6 +773,313 @@ def harvest_detailed_time_entries(
         f"{len(entries)} entries, {missing_notes} utan notes"
     )
     return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 8: Lista tasks för ett projekt
+# ======================================================================
+
+@mcp.tool()
+def harvest_get_project_tasks(project_id: int) -> str:
+    """
+    Lista tillgangliga tasks for ett Harvest-projekt.
+
+    Returnerar task-ID och namn. Behovs for att valja ratt task_id
+    vid skapande av tidsposter.
+
+    Args:
+        project_id: Harvest projekt-ID (hamta fran harvest_list_projects)
+    """
+    client = _get_client()
+    assignments = client.get_task_assignments(project_id)
+
+    if not assignments:
+        return f"Inga tasks hittades for projekt {project_id}."
+
+    lines = [
+        f"## Tasks for projekt {project_id}\n",
+        "| Task ID | Namn | Billable | Aktiv |",
+        "|---------|------|----------|-------|",
+    ]
+
+    for a in assignments:
+        task = a.get('task', {}) or {}
+        task_id = task.get('id', '—')
+        task_name = task.get('name', 'Unknown')
+        billable = 'Ja' if a.get('billable') else 'Nej'
+        active = 'Ja' if a.get('is_active') else 'Nej'
+        lines.append(f"| {task_id} | {task_name} | {billable} | {active} |")
+
+    logging.info(f"harvest_get_project_tasks: projekt {project_id}, {len(assignments)} tasks")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 9: Prepare timesheet (draft)
+# ======================================================================
+
+@mcp.tool()
+def harvest_prepare_timesheet(entries: str, user_id: int = 0) -> str:
+    """
+    Skapa ett utkast (draft) av tidsposter for granskning innan commit.
+
+    ALL skapning av tidsposter MASTE ga via prepare -> commit.
+    Returnerar en preview-tabell och ett draft_id som anvands i commit.
+
+    Args:
+        entries: JSON-lista med entries. Varje entry: {"project_id": int, "task_id": int, "spent_date": "YYYY-MM-DD", "hours": float, "notes": "beskrivning"}
+        user_id: Harvest user-ID (0 = inloggad anvandare)
+    """
+    import json as _json
+
+    _cleanup_expired_drafts()
+
+    try:
+        entry_list = _json.loads(entries)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Ogiltigt JSON i entries: {e}")
+
+    if not isinstance(entry_list, list) or len(entry_list) == 0:
+        raise ValueError("entries maste vara en icke-tom JSON-lista.")
+
+    client = _get_client()
+
+    # Cacha projektnamn + tasknamn for preview
+    project_cache = {}
+    task_cache = {}
+
+    validated = []
+    for i, entry in enumerate(entry_list):
+        # Validera obligatoriska falt
+        for field in ('project_id', 'task_id', 'spent_date', 'hours'):
+            if field not in entry:
+                raise ValueError(f"Entry {i}: saknar obligatoriskt falt '{field}'")
+
+        # Validera datum
+        try:
+            datetime.strptime(entry['spent_date'], '%Y-%m-%d')
+        except ValueError:
+            raise ValueError(f"Entry {i}: ogiltigt datumformat '{entry['spent_date']}'. Anvand YYYY-MM-DD.")
+
+        # Validera hours
+        if not isinstance(entry['hours'], (int, float)) or entry['hours'] <= 0:
+            raise ValueError(f"Entry {i}: hours maste vara > 0, fick {entry['hours']}")
+
+        # Notes obligatoriskt
+        notes = (entry.get('notes') or '').strip()
+        if not notes:
+            raise ValueError(f"Entry {i}: notes ar obligatoriskt (projekt {entry['project_id']}, {entry['spent_date']})")
+
+        # Sla upp projektnamn
+        pid = entry['project_id']
+        if pid not in project_cache:
+            try:
+                projects = client.get_projects(is_active=True)
+                for p in projects:
+                    project_cache[p['id']] = p['name']
+            except Exception:
+                project_cache[pid] = str(pid)
+
+        # Sla upp tasknamn
+        tid = entry['task_id']
+        cache_key = (pid, tid)
+        if cache_key not in task_cache:
+            try:
+                assignments = client.get_task_assignments(pid)
+                for a in assignments:
+                    t = a.get('task', {}) or {}
+                    task_cache[(pid, t.get('id'))] = t.get('name', str(t.get('id')))
+            except Exception:
+                task_cache[cache_key] = str(tid)
+
+        validated.append({
+            'project_id': pid,
+            'task_id': tid,
+            'spent_date': entry['spent_date'],
+            'hours': entry['hours'],
+            'notes': notes,
+            'project_name': project_cache.get(pid, str(pid)),
+            'task_name': task_cache.get(cache_key, str(tid)),
+        })
+
+    # Skapa draft
+    draft_id = str(uuid.uuid4())[:8]
+    _drafts[draft_id] = {
+        'entries': validated,
+        'user_id': user_id if user_id else None,
+        'created_at': datetime.now(),
+        'committed': False,
+    }
+
+    # Bygg preview
+    total_hours = sum(e['hours'] for e in validated)
+    lines = [
+        f"## Draft: {draft_id}",
+        f"*{len(validated)} poster, {total_hours:.1f}h totalt*\n",
+        "| # | Datum | Projekt | Task | Timmar | Notes |",
+        "|---|-------|---------|------|--------|-------|",
+    ]
+    for i, e in enumerate(validated, 1):
+        notes_preview = e['notes'][:60] + '...' if len(e['notes']) > 60 else e['notes']
+        notes_preview = notes_preview.replace('|', '\\|')
+        lines.append(
+            f"| {i} | {e['spent_date']} | {e['project_name']} | {e['task_name']} | "
+            f"{e['hours']:.1f}h | {notes_preview} |"
+        )
+
+    lines.append(f"\n**draft_id: `{draft_id}`** — giltig i {_DRAFT_TTL_MINUTES} minuter.")
+    lines.append("Anropa `harvest_commit_timesheet(draft_id)` for att posta till Harvest.")
+
+    logging.info(f"harvest_prepare_timesheet: draft {draft_id}, {len(validated)} entries, {total_hours:.1f}h")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 10: Commit timesheet (draft -> Harvest)
+# ======================================================================
+
+@mcp.tool()
+def harvest_commit_timesheet(draft_id: str) -> str:
+    """
+    Posta ett tidigare forberett utkast till Harvest.
+
+    HARDFAIL om draft saknas, har expired eller redan ar committed.
+    Postar entries i ordning. Vid fel STOPPAS processen och
+    rapporterar vilken rad som felade.
+
+    Args:
+        draft_id: Draft-ID fran harvest_prepare_timesheet
+    """
+    if draft_id not in _drafts:
+        raise ValueError(f"Draft '{draft_id}' finns inte eller har expired.")
+
+    draft = _drafts[draft_id]
+
+    if draft['committed']:
+        raise ValueError(f"Draft '{draft_id}' har redan committats.")
+
+    # Kolla TTL
+    age_minutes = (datetime.now() - draft['created_at']).total_seconds() / 60
+    if age_minutes > _DRAFT_TTL_MINUTES:
+        del _drafts[draft_id]
+        raise ValueError(f"Draft '{draft_id}' har expired ({age_minutes:.0f} min > {_DRAFT_TTL_MINUTES} min).")
+
+    client = _get_client()
+    uid = draft['user_id']
+    results = []
+
+    for i, entry in enumerate(draft['entries']):
+        try:
+            result = client.create_time_entry(
+                project_id=entry['project_id'],
+                task_id=entry['task_id'],
+                spent_date=entry['spent_date'],
+                hours=entry['hours'],
+                notes=entry['notes'],
+                user_id=uid,
+            )
+            entry_id = result.get('id', '?')
+            results.append(f"| {i+1} | {entry['spent_date']} | {entry['project_name']} | {entry['hours']:.1f}h | {entry_id} |")
+        except Exception as e:
+            # STOPP — rapportera var det gick fel
+            draft['committed'] = True  # Markera for att forhindra retry
+            lines = [
+                f"## Commit AVBRUTEN vid rad {i+1} av {len(draft['entries'])}",
+                f"**Fel:** {e}\n",
+            ]
+            if results:
+                lines.append("Lyckade poster (redan i Harvest):")
+                lines.append("| # | Datum | Projekt | Timmar | Entry ID |")
+                lines.append("|---|-------|---------|--------|----------|")
+                lines.extend(results)
+            lines.append(f"\n**{len(draft['entries']) - i} poster EJ postade.** Korrigera och skapa ny draft.")
+            logging.error(f"harvest_commit_timesheet: draft {draft_id} failed at entry {i}: {e}")
+            return '\n'.join(lines)
+
+    draft['committed'] = True
+
+    lines = [
+        f"## Commit klar: {draft_id}",
+        f"*{len(results)} poster postade till Harvest*\n",
+        "| # | Datum | Projekt | Timmar | Entry ID |",
+        "|---|-------|---------|--------|----------|",
+    ]
+    lines.extend(results)
+
+    logging.info(f"harvest_commit_timesheet: draft {draft_id}, {len(results)} entries committed")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 11: Uppdatera tidspost
+# ======================================================================
+
+@mcp.tool()
+def harvest_update_time_entry(
+    entry_id: int,
+    hours: float = 0.0,
+    notes: str = "",
+    project_id: int = 0,
+    task_id: int = 0
+) -> str:
+    """
+    Uppdatera en befintlig tidspost i Harvest.
+
+    Ange bara de falt som ska andras. Oandrade falt behalls.
+
+    Args:
+        entry_id: Tidspostens ID (fran harvest_detailed_time_entries)
+        hours: Nya timmar (0 = andras inte)
+        notes: Ny kommentar (tom = andras inte)
+        project_id: Nytt projekt-ID (0 = andras inte)
+        task_id: Nytt task-ID (0 = andras inte)
+    """
+    client = _get_client()
+
+    fields = {}
+    if hours:
+        fields['hours'] = hours
+    if notes:
+        fields['notes'] = notes
+    if project_id:
+        fields['project_id'] = project_id
+    if task_id:
+        fields['task_id'] = task_id
+
+    if not fields:
+        return "Inga falt att uppdatera. Ange minst hours, notes, project_id eller task_id."
+
+    result = client.update_time_entry(entry_id, **fields)
+
+    proj_name = (result.get('project', {}) or {}).get('name', '?')
+    updated_hours = result.get('hours', '?')
+
+    logging.info(f"harvest_update_time_entry: entry {entry_id} -> {fields}")
+    return (
+        f"Tidspost uppdaterad: entry_id={entry_id} | {proj_name} | "
+        f"{updated_hours}h | uppdaterade falt: {', '.join(fields.keys())}"
+    )
+
+
+# ======================================================================
+# TOOL 12: Ta bort tidspost
+# ======================================================================
+
+@mcp.tool()
+def harvest_delete_time_entry(entry_id: int) -> str:
+    """
+    Ta bort en tidspost fran Harvest.
+
+    VARNING: Denna operation kan inte angras.
+
+    Args:
+        entry_id: Tidspostens ID (fran harvest_detailed_time_entries)
+    """
+    client = _get_client()
+    client.delete_time_entry(entry_id)
+
+    logging.info(f"harvest_delete_time_entry: entry {entry_id} borttagen")
+    return f"Tidspost borttagen: entry_id={entry_id}"
 
 
 # ======================================================================

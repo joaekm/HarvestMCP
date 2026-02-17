@@ -38,37 +38,41 @@ class HarvestClient:
             'Content-Type': 'application/json',
         })
 
-    def _request(self, method: str, path: str, params: dict = None) -> dict:
+    def _request(self, method: str, path: str, params: dict = None,
+                 json_body: dict = None) -> dict | None:
         """HTTP-anrop med auth-refresh och rate limit-hantering.
 
         - 401 -> refresh token, retry en gång
         - 429 -> respektera Retry-After, vänta, retry
         - Andra fel -> HARDFAIL
+        - 200/201 -> returnera JSON (eller None vid 200 utan body)
         """
         url = f"{self._base_url}{path}" if path.startswith('/') else path
 
-        resp = self._session.request(method, url, params=params)
+        resp = self._session.request(method, url, params=params, json=json_body)
 
         # Token expired - refresh och retry
         if resp.status_code == 401:
             log.info("Harvest 401 - refreshing token")
             self._token_data = refresh_access_token(self._config, self._token_data)
             self._session.headers['Authorization'] = f"Bearer {self._token_data['access_token']}"
-            resp = self._session.request(method, url, params=params)
+            resp = self._session.request(method, url, params=params, json=json_body)
 
         # Rate limited - vänta och retry
         if resp.status_code == 429:
             retry_after = int(resp.headers.get('Retry-After', 16))
             log.warning(f"Harvest rate limited, waiting {retry_after}s")
             time.sleep(retry_after)
-            resp = self._session.request(method, url, params=params)
+            resp = self._session.request(method, url, params=params, json=json_body)
 
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Harvest API error: {resp.status_code} {method} {url} - {resp.text[:500]}"
             )
 
-        return resp.json()
+        if resp.content:
+            return resp.json()
+        return None
 
     def _paginate(self, path: str, params: dict = None, result_key: str = None) -> list:
         """Hämta alla sidor automatiskt.
@@ -159,6 +163,39 @@ class HarvestClient:
         params = {'from': from_date, 'to': to_date}
         data = self._request('GET', '/reports/uninvoiced', params=params)
         return data.get('results', [])
+
+    def get_task_assignments(self, project_id: int) -> list:
+        """Hämta tillgängliga tasks för ett projekt."""
+        return self._paginate(
+            f'/projects/{project_id}/task_assignments',
+            result_key='task_assignments'
+        )
+
+    def create_time_entry(self, project_id: int, spent_date: str, hours: float,
+                          task_id: int, notes: str = "", user_id: int = None) -> dict:
+        """Skapa ny tidspost. POST /time_entries."""
+        body = {
+            'project_id': project_id,
+            'task_id': task_id,
+            'spent_date': spent_date,
+            'hours': hours,
+        }
+        if notes:
+            body['notes'] = notes
+        if user_id is not None:
+            body['user_id'] = user_id
+        return self._request('POST', '/time_entries', json_body=body)
+
+    def update_time_entry(self, entry_id: int, **fields) -> dict:
+        """Uppdatera tidspost. PATCH /time_entries/{id}.
+
+        Giltiga fields: project_id, task_id, spent_date, hours, notes.
+        """
+        return self._request('PATCH', f'/time_entries/{entry_id}', json_body=fields)
+
+    def delete_time_entry(self, entry_id: int) -> None:
+        """Ta bort tidspost. DELETE /time_entries/{id}."""
+        self._request('DELETE', f'/time_entries/{entry_id}')
 
 
 class ForecastClient:

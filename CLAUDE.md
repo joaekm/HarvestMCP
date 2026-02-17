@@ -27,6 +27,8 @@ HarvestMCP/
   harvest_mcp.py       # MCP-server med verktyg
   install.sh           # Installationsscript
   requirements.txt     # Python-beroenden
+  skills/              # Claude Code skills (kopiera till ~/.claude/skills/)
+    tidrapport.md      # /tidrapport — automatisk tidrapportering
 ```
 
 ## Kommandon
@@ -53,6 +55,11 @@ python3 harvest_mcp.py
 | harvest_list_projects | Lista projekt med ID (for filtrering) |
 | harvest_list_users | Lista anvandare med ID (for filtrering) |
 | harvest_detailed_time_entries | Detaljerade tidsposter med kommentarer/notes |
+| harvest_get_project_tasks | Lista tillgangliga tasks for ett projekt (behövs for task_id) |
+| harvest_prepare_timesheet | Skapa utkast av tidsposter for granskning (returnerar draft_id) |
+| harvest_commit_timesheet | Posta granskat utkast till Harvest (kräver draft_id) |
+| harvest_update_time_entry | Uppdatera timmar/notes pa befintlig post (PATCH /time_entries/{id}) |
+| harvest_delete_time_entry | Ta bort en tidspost (DELETE /time_entries/{id}) |
 | forecast_schedule | Vem ar schemalagd pa vilka projekt i Forecast |
 
 ## Config
@@ -60,6 +67,18 @@ python3 harvest_mcp.py
 - OAuth credentials i `config.yaml` (delade — kopplade till appen, inte anvandaren)
 - Harvest-token: `~/.harvest/token.json`
 - Forecast-token: `~/.harvest/forecast_token.json`
+
+## Skills
+
+Skill-filer lever i `skills/` i repot och kopieras till `~/.claude/skills/` for att aktiveras:
+
+```bash
+cp skills/*.md ~/.claude/skills/
+```
+
+| Skill | Beskrivning |
+|-------|-------------|
+| /tidrapport | Bygger och postar veckans tidrapport via Forecast + MyMemory |
 
 ## Regler
 
