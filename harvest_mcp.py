@@ -844,53 +844,45 @@ def harvest_prepare_timesheet(entries: str, user_id: int = 0) -> str:
 
     client = _get_client()
 
-    # Cacha projektnamn + tasknamn for preview
-    project_cache = {}
-    task_cache = {}
-
-    validated = []
+    # Validera alla entries först (snabb loop, inga API-anrop)
     for i, entry in enumerate(entry_list):
-        # Validera obligatoriska falt
         for field in ('project_id', 'task_id', 'spent_date', 'hours'):
             if field not in entry:
                 raise ValueError(f"Entry {i}: saknar obligatoriskt falt '{field}'")
-
-        # Validera datum
         try:
             datetime.strptime(entry['spent_date'], '%Y-%m-%d')
         except ValueError:
             raise ValueError(f"Entry {i}: ogiltigt datumformat '{entry['spent_date']}'. Anvand YYYY-MM-DD.")
-
-        # Validera hours
         if not isinstance(entry['hours'], (int, float)) or entry['hours'] <= 0:
             raise ValueError(f"Entry {i}: hours maste vara > 0, fick {entry['hours']}")
 
-        # Notes obligatoriskt
-        notes = (entry.get('notes') or '').strip()
-        if not notes:
-            raise ValueError(f"Entry {i}: notes ar obligatoriskt (projekt {entry['project_id']}, {entry['spent_date']})")
+    # Hämta projektnamn — EN gång
+    project_cache = {}
+    try:
+        projects = client.get_projects(is_active=True)
+        for p in projects:
+            project_cache[p['id']] = p['name']
+    except Exception:
+        pass
 
-        # Sla upp projektnamn
+    # Hämta tasknamn — en gång per unikt projekt
+    task_cache = {}
+    unique_pids = set(e['project_id'] for e in entry_list)
+    for pid in unique_pids:
+        try:
+            assignments = client.get_task_assignments(pid)
+            for a in assignments:
+                t = a.get('task', {}) or {}
+                task_cache[(pid, t.get('id'))] = t.get('name', str(t.get('id')))
+        except Exception:
+            pass
+
+    # Bygg validerad lista med namn
+    validated = []
+    for i, entry in enumerate(entry_list):
         pid = entry['project_id']
-        if pid not in project_cache:
-            try:
-                projects = client.get_projects(is_active=True)
-                for p in projects:
-                    project_cache[p['id']] = p['name']
-            except Exception:
-                project_cache[pid] = str(pid)
-
-        # Sla upp tasknamn
         tid = entry['task_id']
-        cache_key = (pid, tid)
-        if cache_key not in task_cache:
-            try:
-                assignments = client.get_task_assignments(pid)
-                for a in assignments:
-                    t = a.get('task', {}) or {}
-                    task_cache[(pid, t.get('id'))] = t.get('name', str(t.get('id')))
-            except Exception:
-                task_cache[cache_key] = str(tid)
+        notes = (entry.get('notes') or '').strip()
 
         validated.append({
             'project_id': pid,
@@ -899,7 +891,7 @@ def harvest_prepare_timesheet(entries: str, user_id: int = 0) -> str:
             'hours': entry['hours'],
             'notes': notes,
             'project_name': project_cache.get(pid, str(pid)),
-            'task_name': task_cache.get(cache_key, str(tid)),
+            'task_name': task_cache.get((pid, tid), str(tid)),
         })
 
     # Skapa draft

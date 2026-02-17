@@ -27,8 +27,8 @@ HarvestMCP/
   harvest_mcp.py       # MCP-server med verktyg
   install.sh           # Installationsscript
   requirements.txt     # Python-beroenden
-  skills/              # Claude Code skills (kopiera till ~/.claude/skills/)
-    tidrapport.md      # /tidrapport — automatisk tidrapportering
+  skills/                        # Claude Code skills
+    tidrapport/SKILL.md          # /tidrapport — automatisk tidrapportering
 ```
 
 ## Kommandon
@@ -70,11 +70,16 @@ python3 harvest_mcp.py
 
 ## Skills
 
-Skill-filer lever i `skills/` i repot och kopieras till `~/.claude/skills/` for att aktiveras:
+Skills foljer Claude Code-formatet: en mapp per skill med `SKILL.md` som entrypoint.
+Kallkoden lever i `skills/` i repot. Anvandaren kopierar mappen manuellt
+till `~/.claude/skills/` och registrerar i Claude Code Settings.
 
-```bash
-cp skills/*.md ~/.claude/skills/
-```
+Claude Code ska ALDRIG kopiera eller installera skills — det gor anvandaren sjalv.
+
+Arbetssatt vid andring av en skill:
+1. Redigera `skills/<namn>/SKILL.md` i repot
+2. Committa
+3. Anvandaren kopierar mappen till `~/.claude/skills/` sjalv
 
 | Skill | Beskrivning |
 |-------|-------------|
