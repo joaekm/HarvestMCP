@@ -2,6 +2,33 @@
 
 MCP-server som exponerar Harvest- och Forecast-data som verktyg for Claude Desktop, Cursor och andra AI-verktyg.
 
+## Smart anvandning av verktygen (for AI-agenter)
+
+Verktygen ar context-optimerade med `max_rows` och kompakta format.
+Folj dessa regler for att minimera token-forbrukning:
+
+1. **Borja med oversikt, zooma in vid behov**
+   - `harvest_team_utilization` — snabb oversikt, alltid kompakt
+   - `harvest_time_summary` (group_by="summary") — aggregerad per projekt
+   - Anropa `harvest_detailed_time_entries` BARA nar du behover enskilda poster
+
+2. **Anvand filter — hamta aldrig all data**
+   - Ange `project_id` eller `user_id` nar du kan
+   - Smal datumintervall (en vecka, inte en manad)
+
+3. **Lat max_rows vara default (30)**
+   - Oka bara om anvandaren explicit behover mer
+   - Output visar alltid totaler aven vid trunkering
+
+4. **Anropa inte lookup-verktyg i onodan**
+   - `harvest_list_projects`/`harvest_list_users` — bara om du inte redan har ID
+   - Om du redan vet projekt-ID fran tidigare i konversationen, anvand det direkt
+
+5. **Valj ratt group_by i harvest_time_summary**
+   - "summary" (default): minst output, en rad per projekt
+   - "project": per projekt med personuppdelning
+   - "person": per person med projektuppdelning
+
 ## Installation
 
 ```bash
@@ -10,12 +37,12 @@ cd HarvestMCP
 ./install.sh
 ```
 
-Scriptet:
-1. Skapar venv och installerar dependencies
-2. Kor OAuth for Harvest (valj Harvest i webblasaren)
-3. Kor OAuth for Forecast (valj Forecast i webblasaren)
-4. Verifierar anslutningen
-5. Registrerar MCP-servern i Claude Desktop
+Scriptet ar idempotent — kor om utan problem. Hoppar over steg som redan ar klara:
+1. Skapar venv och installerar dependencies (hoppar over om oforandrat)
+2. Harvest OAuth (hoppar over om token finns)
+3. Forecast OAuth (hoppar over om token finns)
+4. Registrerar MCP-servern i Claude Desktop (hoppar over om redan registrerad)
+5. Verifierar anslutningen mot Harvest API
 
 ## Projektstruktur
 
@@ -47,20 +74,42 @@ python3 harvest_mcp.py
 
 ## MCP-verktyg
 
+### Oversikt & analys (borja har)
+
+| Verktyg | Beskrivning | Context-kostnad |
+|---------|-------------|-----------------|
+| harvest_team_utilization | Teamets belaggning: billable/non-billable, util% | Lag (en rad/person) |
+| harvest_time_summary | Flexibel tidsrapport med group_by och filter | Lag-medel |
+| forecast_schedule | Vem ar schemalagd pa vilka projekt i Forecast | Lag |
+
+### Detaljer (anvand med filter)
+
+| Verktyg | Beskrivning | Context-kostnad |
+|---------|-------------|-----------------|
+| harvest_detailed_time_entries | Enskilda tidsposter med entry_id och kommentarer | HOG — anvand filter + max_rows |
+
+### Lookup (cacha resultaten)
+
+| Verktyg | Beskrivning | Context-kostnad |
+|---------|-------------|-----------------|
+| harvest_list_projects | Lista projekt med ID (for filtrering) | Medel |
+| harvest_list_users | Lista anvandare med ID (for filtrering) | Lag |
+| harvest_get_project_tasks | Tasks for ett projekt (behovs for task_id) | Lag |
+
+### Skrivoperationer
+
 | Verktyg | Beskrivning |
 |---------|-------------|
-| harvest_team_utilization | Teamets belaggning: billable/non-billable, kapacitet, util% |
-| harvest_who_works_on_what | Vem jobbar med vad, grupperat per projekt eller person |
-| harvest_time_summary | Flexibel tidsrapport med filter (projekt, kund, person) |
-| harvest_list_projects | Lista projekt med ID (for filtrering) |
-| harvest_list_users | Lista anvandare med ID (for filtrering) |
-| harvest_detailed_time_entries | Detaljerade tidsposter med kommentarer/notes |
-| harvest_get_project_tasks | Lista tillgangliga tasks for ett projekt (behövs for task_id) |
-| harvest_prepare_timesheet | Skapa utkast av tidsposter for granskning (returnerar draft_id) |
-| harvest_commit_timesheet | Posta granskat utkast till Harvest (kräver draft_id) |
-| harvest_update_time_entry | Uppdatera timmar/notes pa befintlig post (PATCH /time_entries/{id}) |
-| harvest_delete_time_entry | Ta bort en tidspost (DELETE /time_entries/{id}) |
-| forecast_schedule | Vem ar schemalagd pa vilka projekt i Forecast |
+| harvest_prepare_timesheet | Skapa utkast av tidsposter (returnerar draft_id) |
+| harvest_commit_timesheet | Posta granskat utkast till Harvest |
+| harvest_update_time_entry | Uppdatera timmar/notes pa befintlig post |
+| harvest_delete_time_entry | Ta bort en tidspost |
+
+### System
+
+| Verktyg | Beskrivning |
+|---------|-------------|
+| harvest_self_update | Uppdatera fran GitHub: pull + dependencies |
 
 ## Config
 

@@ -4,6 +4,9 @@ HarvestMCP - MCP-server för Harvest-rapporter.
 Exponerar Harvest-data som MCP-verktyg för Claude Desktop, Cursor och andra AI-verktyg.
 Fokus: Team utilization, tidsrapporter, projektöversikter.
 
+CONTEXT-OPTIMERAD: Alla verktyg har max_rows och compact-läge för att
+minimera token-förbrukning i LLM-kontextfönster.
+
 Registrera i Claude Desktop:
 {
     "mcpServers": {
@@ -61,7 +64,19 @@ except FileNotFoundError as e:
     CONFIG = {}
 
 # --- MCP SERVER ---
-mcp = FastMCP("HarvestReports")
+_INSTRUCTIONS = """
+Harvest- och Forecast-verktyg for tidsrapportering och resursplanering.
+
+STRATEGI — minimera context-forbrukning:
+1. Borja med harvest_team_utilization eller harvest_time_summary (group_by="summary") for oversikt.
+2. Anvand filter (project_id, user_id, datumintervall) for att begränsa data.
+3. Anropa harvest_detailed_time_entries BARA nar du behover enskilda poster eller entry_id.
+4. Anropa harvest_list_projects/harvest_list_users bara om du saknar ID — cacha resultaten.
+5. Lat max_rows vara default (30). Oka bara om anvandaren explicit behover mer.
+6. For tidrapportering: prepare -> granska -> commit. Alla poster via harvest_prepare_timesheet forst.
+""".strip()
+
+mcp = FastMCP("HarvestReports", instructions=_INSTRUCTIONS)
 
 # Lazy-init clients
 _client = None
@@ -70,6 +85,9 @@ _forecast_client = None
 # --- Prepare/commit draft storage ---
 _drafts = {}  # draft_id → draft-objekt
 _DRAFT_TTL_MINUTES = 30
+
+# --- Default limits ---
+_DEFAULT_MAX_ROWS = 30
 
 
 def _get_client() -> HarvestClient:
@@ -132,6 +150,12 @@ def _weeks_in_range(from_date: str, to_date: str) -> float:
     return days / 7.0
 
 
+def _truncation_note(shown: int, total: int) -> str:
+    """Generera trunkerings-meddelande."""
+    hidden = total - shown
+    return f"\n*Visar {shown} av {total} rader. {hidden} dolda — oka max_rows for att se fler.*"
+
+
 # ======================================================================
 # TOOL 1: Team Utilization
 # ======================================================================
@@ -143,6 +167,9 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
 
     Returnerar per person: totala timmar, billable/non-billable,
     kapacitet och utilization-procent.
+
+    CONTEXT-TIPS: Returnerar alltid kompakt data (en rad per person).
+    Bra som forsta steg for att fa en oversikt.
 
     Args:
         from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
@@ -197,10 +224,9 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
     rows.sort(key=lambda r: r['util'], reverse=True)
 
     lines = [
-        f"## Team Utilization: {from_date} \u2192 {to_date}",
-        f"*Period: {weeks:.1f} veckor*\n",
-        "| Person | Billable | Non-bill | Totalt | Kapacitet | Util % |",
-        "|--------|----------|----------|--------|-----------|--------|",
+        f"Team Utilization: {from_date} -> {to_date} ({weeks:.1f} veckor)\n",
+        "| Person | Billable | Non-bill | Totalt | Kapacitet | Util% |",
+        "|--------|----------|----------|--------|-----------|-------|",
     ]
 
     for r in rows:
@@ -211,7 +237,7 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
 
     avg_util = (total_billable / total_capacity * 100) if total_capacity > 0 else 0
     lines.append(
-        f"| **Snitt/Totalt** | **{total_billable:.1f}h** | **{total_nonbill:.1f}h** | "
+        f"| **Totalt** | **{total_billable:.1f}h** | **{total_nonbill:.1f}h** | "
         f"**{total_hours:.1f}h** | **{total_capacity:.1f}h** | **{avg_util:.0f}%** |"
     )
 
@@ -220,128 +246,7 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
 
 
 # ======================================================================
-# TOOL 2: Vem jobbar med vad
-# ======================================================================
-
-@mcp.tool()
-def harvest_who_works_on_what(
-    from_date: str = "",
-    to_date: str = "",
-    group_by: str = "project"
-) -> str:
-    """
-    Visa vem som jobbar med vad under en period.
-
-    Args:
-        from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
-        to_date: Slutdatum YYYY-MM-DD (default: idag)
-        group_by: "project" (vilka jobbar per projekt) eller "person" (vilka projekt per person)
-    """
-    from_date, to_date = _resolve_dates(from_date, to_date)
-    client = _get_client()
-
-    entries = client.get_time_entries(from_date, to_date)
-
-    if group_by == "person":
-        return _format_by_person(entries, from_date, to_date)
-    else:
-        return _format_by_project(entries, from_date, to_date)
-
-
-def _format_by_project(entries: list, from_date: str, to_date: str) -> str:
-    """Gruppera tidsposter per projekt -> per person."""
-    projects = defaultdict(lambda: {
-        'client_name': '',
-        'persons': defaultdict(lambda: {'hours': 0.0, 'billable_hours': 0.0}),
-        'total_hours': 0.0,
-    })
-
-    for e in entries:
-        proj = e.get('project', {}) or {}
-        proj_name = proj.get('name', 'Unknown')
-        client_obj = e.get('client', {}) or {}
-        client_name = client_obj.get('name', '')
-        user = e.get('user', {}) or {}
-        person = user.get('name', 'Unknown')
-        hours = e.get('hours', 0) or 0
-        billable = e.get('billable', False)
-
-        projects[proj_name]['client_name'] = client_name
-        projects[proj_name]['persons'][person]['hours'] += hours
-        if billable:
-            projects[proj_name]['persons'][person]['billable_hours'] += hours
-        projects[proj_name]['total_hours'] += hours
-
-    sorted_projects = sorted(projects.items(), key=lambda x: x[1]['total_hours'], reverse=True)
-
-    lines = [f"## Vem jobbar med vad: {from_date} \u2192 {to_date}\n"]
-
-    for proj_name, data in sorted_projects:
-        client_info = f" ({data['client_name']})" if data['client_name'] else ""
-        lines.append(f"### {proj_name}{client_info} \u2014 {data['total_hours']:.1f}h totalt")
-        lines.append("| Person | Timmar | Billable |")
-        lines.append("|--------|--------|----------|")
-
-        sorted_persons = sorted(
-            data['persons'].items(),
-            key=lambda x: x[1]['hours'],
-            reverse=True
-        )
-        for person, pdata in sorted_persons:
-            bill_str = f"{pdata['billable_hours']:.1f}h" if pdata['billable_hours'] > 0 else "\u2014"
-            lines.append(f"| {person} | {pdata['hours']:.1f}h | {bill_str} |")
-
-        lines.append("")
-
-    logging.info(f"harvest_who_works_on_what(project): {len(sorted_projects)} projekt")
-    return '\n'.join(lines)
-
-
-def _format_by_person(entries: list, from_date: str, to_date: str) -> str:
-    """Gruppera tidsposter per person -> per projekt."""
-    persons = defaultdict(lambda: {
-        'projects': defaultdict(lambda: {'hours': 0.0, 'client_name': ''}),
-        'total_hours': 0.0,
-    })
-
-    for e in entries:
-        proj = e.get('project', {}) or {}
-        proj_name = proj.get('name', 'Unknown')
-        client_obj = e.get('client', {}) or {}
-        client_name = client_obj.get('name', '')
-        user = e.get('user', {}) or {}
-        person = user.get('name', 'Unknown')
-        hours = e.get('hours', 0) or 0
-
-        persons[person]['projects'][proj_name]['hours'] += hours
-        persons[person]['projects'][proj_name]['client_name'] = client_name
-        persons[person]['total_hours'] += hours
-
-    sorted_persons = sorted(persons.items(), key=lambda x: x[1]['total_hours'], reverse=True)
-
-    lines = [f"## Vem jobbar med vad (per person): {from_date} \u2192 {to_date}\n"]
-
-    for person, data in sorted_persons:
-        lines.append(f"### {person} \u2014 {data['total_hours']:.1f}h totalt")
-        lines.append("| Projekt | Kund | Timmar |")
-        lines.append("|---------|------|--------|")
-
-        sorted_projects = sorted(
-            data['projects'].items(),
-            key=lambda x: x[1]['hours'],
-            reverse=True
-        )
-        for proj_name, pdata in sorted_projects:
-            lines.append(f"| {proj_name} | {pdata['client_name']} | {pdata['hours']:.1f}h |")
-
-        lines.append("")
-
-    logging.info(f"harvest_who_works_on_what(person): {len(sorted_persons)} personer")
-    return '\n'.join(lines)
-
-
-# ======================================================================
-# TOOL 3: Flexibel tidssammanställning
+# TOOL 2: Tidssammanstallning (merged time_summary + who_works_on_what)
 # ======================================================================
 
 @mcp.tool()
@@ -350,13 +255,24 @@ def harvest_time_summary(
     to_date: str = "",
     project_id: str = "",
     client_id: str = "",
-    user_id: str = ""
+    user_id: str = "",
+    group_by: str = "summary",
+    max_rows: int = _DEFAULT_MAX_ROWS
 ) -> str:
     """
-    Flexibel tidssammanstallning med valfria filter.
+    Flexibel tidssammanstallning — DET PRIMARA VERKTYGET for tidsoversikter.
 
-    Visar aggregerade timmar, billable/non-billable och belopp,
-    grupperat per projekt och person.
+    CONTEXT-TIPS FOR AI-AGENTER:
+    - Borja ALLTID har for tidsfragor. Undvik harvest_detailed_time_entries
+      om du inte verkligen behover enskilda poster.
+    - Anvand group_by="summary" (default) for minst context-forbrukning.
+    - Anvand filter (project_id, user_id) for att begränsa data.
+    - Oka max_rows bara om du BEHOVER se fler rader.
+
+    group_by-lagen:
+    - "summary": Kompakt — en rad per projekt med totaler (STANDARD)
+    - "project": Per projekt -> vilka personer jobbar dar
+    - "person": Per person -> vilka projekt de jobbar med
 
     Args:
         from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
@@ -364,6 +280,8 @@ def harvest_time_summary(
         project_id: Filtrera pa projekt-ID (valfritt)
         client_id: Filtrera pa kund-ID (valfritt)
         user_id: Filtrera pa person-ID (valfritt)
+        group_by: "summary" (default), "project", eller "person"
+        max_rows: Max antal rader i output (default 30, 0=alla)
     """
     from_date, to_date = _resolve_dates(from_date, to_date)
     client = _get_client()
@@ -379,11 +297,27 @@ def harvest_time_summary(
     entries = client.get_time_entries(from_date, to_date, **filters)
 
     if not entries:
-        return f"Inga tidsposter hittades for {from_date} \u2192 {to_date} med angivna filter."
+        return f"Inga tidsposter hittades for {from_date} -> {to_date} med angivna filter."
 
+    if group_by == "person":
+        result = _format_by_person(entries, from_date, to_date, max_rows)
+    elif group_by == "project":
+        result = _format_by_project(entries, from_date, to_date, max_rows)
+    else:
+        result = _format_summary(entries, from_date, to_date, max_rows)
+
+    logging.info(
+        f"harvest_time_summary({group_by}): {from_date} -> {to_date}, "
+        f"{len(entries)} entries, max_rows={max_rows}"
+    )
+    return result
+
+
+def _format_summary(entries: list, from_date: str, to_date: str, max_rows: int) -> str:
+    """Kompakt sammanfattning — en rad per projekt."""
     total_hours = 0.0
     billable_hours = 0.0
-    billable_amount = defaultdict(float)
+    billable_amount = 0.0
     by_project = defaultdict(lambda: {'hours': 0.0, 'billable_hours': 0.0, 'persons': set()})
 
     for e in entries:
@@ -393,12 +327,10 @@ def harvest_time_summary(
         if e.get('billable', False):
             billable_hours += hours
             rate = e.get('billable_rate') or 0
-            billable_amount['SEK'] += hours * rate
+            billable_amount += hours * rate
 
-        proj = e.get('project', {}) or {}
-        proj_name = proj.get('name', 'Unknown')
-        user = e.get('user', {}) or {}
-        person = user.get('name', 'Unknown')
+        proj_name = (e.get('project', {}) or {}).get('name', 'Unknown')
+        person = (e.get('user', {}) or {}).get('name', 'Unknown')
 
         by_project[proj_name]['hours'] += hours
         if e.get('billable', False):
@@ -408,29 +340,212 @@ def harvest_time_summary(
     nonbill_hours = total_hours - billable_hours
 
     lines = [
-        f"## Tidssammanstallning: {from_date} \u2192 {to_date}\n",
-        f"**Totalt:** {total_hours:.1f}h | **Billable:** {billable_hours:.1f}h | "
-        f"**Non-billable:** {nonbill_hours:.1f}h",
+        f"Tidssammanstallning: {from_date} -> {to_date} | "
+        f"Totalt: {total_hours:.1f}h | Billable: {billable_hours:.1f}h | "
+        f"Non-billable: {nonbill_hours:.1f}h",
     ]
 
-    for currency, amount in billable_amount.items():
-        if amount > 0:
-            lines.append(f"**Billable belopp:** {amount:,.0f} {currency}")
+    if billable_amount > 0:
+        lines[0] += f" | Belopp: {billable_amount:,.0f} SEK"
 
     lines.append("")
     lines.append("| Projekt | Timmar | Billable | Personer |")
     lines.append("|---------|--------|----------|----------|")
 
     sorted_projects = sorted(by_project.items(), key=lambda x: x[1]['hours'], reverse=True)
-    for proj_name, data in sorted_projects:
+    total_count = len(sorted_projects)
+    display = sorted_projects if (max_rows == 0) else sorted_projects[:max_rows]
+
+    for proj_name, data in display:
         persons_str = ', '.join(sorted(data['persons']))
         lines.append(
             f"| {proj_name} | {data['hours']:.1f}h | {data['billable_hours']:.1f}h | {persons_str} |"
         )
 
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
+
+    return '\n'.join(lines)
+
+
+def _format_by_project(entries: list, from_date: str, to_date: str, max_rows: int) -> str:
+    """Gruppera tidsposter per projekt -> per person."""
+    projects = defaultdict(lambda: {
+        'client_name': '',
+        'persons': defaultdict(lambda: {'hours': 0.0, 'billable_hours': 0.0}),
+        'total_hours': 0.0,
+    })
+
+    for e in entries:
+        proj_name = (e.get('project', {}) or {}).get('name', 'Unknown')
+        client_name = (e.get('client', {}) or {}).get('name', '')
+        person = (e.get('user', {}) or {}).get('name', 'Unknown')
+        hours = e.get('hours', 0) or 0
+        billable = e.get('billable', False)
+
+        projects[proj_name]['client_name'] = client_name
+        projects[proj_name]['persons'][person]['hours'] += hours
+        if billable:
+            projects[proj_name]['persons'][person]['billable_hours'] += hours
+        projects[proj_name]['total_hours'] += hours
+
+    sorted_projects = sorted(projects.items(), key=lambda x: x[1]['total_hours'], reverse=True)
+    total_count = len(sorted_projects)
+    display = sorted_projects if (max_rows == 0) else sorted_projects[:max_rows]
+
+    lines = [f"Per projekt: {from_date} -> {to_date}\n"]
+
+    row_count = 0
+    for proj_name, data in display:
+        client_info = f" ({data['client_name']})" if data['client_name'] else ""
+        lines.append(f"**{proj_name}{client_info}** — {data['total_hours']:.1f}h")
+
+        sorted_persons = sorted(
+            data['persons'].items(), key=lambda x: x[1]['hours'], reverse=True
+        )
+        parts = []
+        for person, pdata in sorted_persons:
+            bill_str = f" (bill: {pdata['billable_hours']:.1f}h)" if pdata['billable_hours'] > 0 else ""
+            parts.append(f"  {person}: {pdata['hours']:.1f}h{bill_str}")
+        lines.extend(parts)
+        lines.append("")
+        row_count += 1
+
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
+
+    return '\n'.join(lines)
+
+
+def _format_by_person(entries: list, from_date: str, to_date: str, max_rows: int) -> str:
+    """Gruppera tidsposter per person -> per projekt."""
+    persons = defaultdict(lambda: {
+        'projects': defaultdict(lambda: {'hours': 0.0, 'client_name': ''}),
+        'total_hours': 0.0,
+    })
+
+    for e in entries:
+        proj_name = (e.get('project', {}) or {}).get('name', 'Unknown')
+        client_name = (e.get('client', {}) or {}).get('name', '')
+        person = (e.get('user', {}) or {}).get('name', 'Unknown')
+        hours = e.get('hours', 0) or 0
+
+        persons[person]['projects'][proj_name]['hours'] += hours
+        persons[person]['projects'][proj_name]['client_name'] = client_name
+        persons[person]['total_hours'] += hours
+
+    sorted_persons = sorted(persons.items(), key=lambda x: x[1]['total_hours'], reverse=True)
+    total_count = len(sorted_persons)
+    display = sorted_persons if (max_rows == 0) else sorted_persons[:max_rows]
+
+    lines = [f"Per person: {from_date} -> {to_date}\n"]
+
+    for person, data in display:
+        lines.append(f"**{person}** — {data['total_hours']:.1f}h")
+        sorted_projects = sorted(
+            data['projects'].items(), key=lambda x: x[1]['hours'], reverse=True
+        )
+        for proj_name, pdata in sorted_projects:
+            lines.append(f"  {proj_name} ({pdata['client_name']}): {pdata['hours']:.1f}h")
+        lines.append("")
+
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
+
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 3: Detaljerade tidsposter (med kommentarer)
+# ======================================================================
+
+@mcp.tool()
+def harvest_detailed_time_entries(
+    from_date: str = "",
+    to_date: str = "",
+    project_id: str = "",
+    client_id: str = "",
+    user_id: str = "",
+    max_rows: int = _DEFAULT_MAX_ROWS
+) -> str:
+    """
+    Visa enskilda tidsposter med kommentarer/notes och entry_id.
+
+    CONTEXT-TIPS FOR AI-AGENTER:
+    - DYRT verktyg — varje tidspost = en rad. Anvand harvest_time_summary
+      forst for att fa oversikt, och detta verktyg bara nar du behover:
+      1. Granska enskilda kommentarer
+      2. Hitta entry_id for update/delete
+      3. Kontrollera poster utan kommentar
+    - Anvand ALLTID filter (user_id, project_id) for att begränsa.
+    - max_rows=30 ar default. Oka bara vid behov.
+
+    Args:
+        from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
+        to_date: Slutdatum YYYY-MM-DD (default: idag)
+        project_id: Filtrera pa projekt-ID (valfritt)
+        client_id: Filtrera pa kund-ID (valfritt)
+        user_id: Filtrera pa person-ID (valfritt)
+        max_rows: Max antal rader (default 30, 0=alla)
+    """
+    from_date, to_date = _resolve_dates(from_date, to_date)
+    client = _get_client()
+
+    filters = {}
+    if project_id:
+        filters['project_id'] = project_id
+    if client_id:
+        filters['client_id'] = client_id
+    if user_id:
+        filters['user_id'] = user_id
+
+    entries = client.get_time_entries(from_date, to_date, **filters)
+
+    if not entries:
+        return f"Inga tidsposter hittades for {from_date} -> {to_date} med angivna filter."
+
+    # Sortera: nyast datum forst, sedan person
+    entries.sort(key=lambda e: (
+        e.get('spent_date', ''),
+        (e.get('user', {}) or {}).get('name', '')
+    ), reverse=True)
+
+    total_count = len(entries)
+    total_hours = sum(e.get('hours', 0) or 0 for e in entries)
+    missing_notes = sum(1 for e in entries if not (e.get('notes') or '').strip())
+
+    display = entries if (max_rows == 0) else entries[:max_rows]
+
+    lines = [
+        f"Tidsposter: {from_date} -> {to_date} | "
+        f"{total_count} poster | {total_hours:.1f}h | {missing_notes} utan kommentar\n",
+        "| ID | Datum | Person | Projekt | Task | Tim | Kommentar |",
+        "|----|-------|--------|---------|------|-----|-----------|",
+    ]
+
+    for e in display:
+        eid = e.get('id', '')
+        date = e.get('spent_date', '')
+        person = (e.get('user', {}) or {}).get('name', 'Unknown')
+        proj_name = (e.get('project', {}) or {}).get('name', 'Unknown')
+        task_name = (e.get('task', {}) or {}).get('name', '')
+        hours = e.get('hours', 0) or 0
+        notes = (e.get('notes') or '').strip()
+
+        if len(notes) > 60:
+            notes = notes[:57] + '...'
+        notes = notes.replace('|', '\\|')
+
+        lines.append(
+            f"| {eid} | {date} | {person} | {proj_name} | {task_name} | {hours:.1f} | {notes} |"
+        )
+
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
+
     logging.info(
-        f"harvest_time_summary: {from_date} -> {to_date}, "
-        f"{total_hours:.1f}h, {len(entries)} entries"
+        f"harvest_detailed_time_entries: {from_date} -> {to_date}, "
+        f"{total_count} entries, showing {len(display)}, {missing_notes} utan notes"
     )
     return '\n'.join(lines)
 
@@ -440,14 +555,16 @@ def harvest_time_summary(
 # ======================================================================
 
 @mcp.tool()
-def harvest_list_projects(active_only: bool = True) -> str:
+def harvest_list_projects(active_only: bool = True, max_rows: int = 0) -> str:
     """
-    Lista alla Harvest-projekt med kund, status och budget-typ.
+    Lista Harvest-projekt med kund, status och budget-typ.
 
-    Anvandbart for att hitta projekt-ID att filtrera med i andra verktyg.
+    CONTEXT-TIPS: Anvands for att hitta projekt-ID att filtrera med.
+    Om du redan vet projekt-ID, skip detta och anropa direkt med filtret.
 
     Args:
         active_only: Visa bara aktiva projekt (default: True)
+        max_rows: Max antal rader (default 0=alla)
     """
     client = _get_client()
     projects = client.get_projects(is_active=active_only)
@@ -455,24 +572,26 @@ def harvest_list_projects(active_only: bool = True) -> str:
     if not projects:
         return "Inga projekt hittades."
 
+    sorted_projects = sorted(projects, key=lambda x: x.get('name', ''))
+    total_count = len(sorted_projects)
+    display = sorted_projects if (max_rows == 0) else sorted_projects[:max_rows]
+
     lines = [
-        f"## Harvest-projekt {'(aktiva)' if active_only else '(alla)'}\n",
-        "| ID | Projekt | Kund | Budget | Billable |",
-        "|----|---------|------|--------|----------|",
+        f"Projekt {'(aktiva)' if active_only else '(alla)'}: {total_count} st\n",
+        "| ID | Projekt | Kund | Billable |",
+        "|----|---------|------|----------|",
     ]
 
-    for p in sorted(projects, key=lambda x: x.get('name', '')):
+    for p in display:
         client_obj = p.get('client')
         client_name = client_obj['name'] if client_obj else '\u2014'
-        budget = p.get('budget') or '\u2014'
-        budget_by = p.get('budget_by', '')
-        if budget != '\u2014' and budget_by:
-            budget = f"{budget} ({budget_by})"
         billable = 'Ja' if p.get('is_billable') else 'Nej'
+        lines.append(f"| {p['id']} | {p['name']} | {client_name} | {billable} |")
 
-        lines.append(f"| {p['id']} | {p['name']} | {client_name} | {budget} | {billable} |")
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
 
-    logging.info(f"harvest_list_projects: {len(projects)} projekt")
+    logging.info(f"harvest_list_projects: {total_count} projekt, showing {len(display)}")
     return '\n'.join(lines)
 
 
@@ -481,14 +600,16 @@ def harvest_list_projects(active_only: bool = True) -> str:
 # ======================================================================
 
 @mcp.tool()
-def harvest_list_users(active_only: bool = True) -> str:
+def harvest_list_users(active_only: bool = True, max_rows: int = 0) -> str:
     """
-    Lista alla Harvest-anvandare med roll och veckokapacitet.
+    Lista Harvest-anvandare med roll och veckokapacitet.
 
-    Anvandbart for att hitta user-ID att filtrera med i andra verktyg.
+    CONTEXT-TIPS: Anvands for att hitta user-ID att filtrera med.
+    Om du redan vet user-ID, skip detta och anropa direkt med filtret.
 
     Args:
         active_only: Visa bara aktiva anvandare (default: True)
+        max_rows: Max antal rader (default 0=alla)
     """
     client = _get_client()
     users = client.get_users(is_active=active_only)
@@ -496,21 +617,25 @@ def harvest_list_users(active_only: bool = True) -> str:
     if not users:
         return "Inga anvandare hittades."
 
+    sorted_users = sorted(users, key=lambda x: x.get('first_name', ''))
+    total_count = len(sorted_users)
+    display = sorted_users if (max_rows == 0) else sorted_users[:max_rows]
+
     lines = [
-        f"## Harvest-anvandare {'(aktiva)' if active_only else '(alla)'}\n",
-        "| ID | Namn | Roller | Kapacitet | Contractor |",
-        "|----|------|--------|-----------|------------|",
+        f"Anvandare {'(aktiva)' if active_only else '(alla)'}: {total_count} st\n",
+        "| ID | Namn | Kapacitet |",
+        "|----|------|-----------|",
     ]
 
-    for u in sorted(users, key=lambda x: x.get('first_name', '')):
+    for u in display:
         name = f"{u.get('first_name', '')} {u.get('last_name', '')}"
-        roles = ', '.join(u.get('roles', [])) or '\u2014'
         cap_h = (u.get('weekly_capacity', 0) or 0) / 3600
-        contractor = 'Ja' if u.get('is_contractor') else 'Nej'
+        lines.append(f"| {u['id']} | {name} | {cap_h:.0f}h/v |")
 
-        lines.append(f"| {u['id']} | {name} | {roles} | {cap_h:.0f}h/v | {contractor} |")
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
 
-    logging.info(f"harvest_list_users: {len(users)} anvandare")
+    logging.info(f"harvest_list_users: {total_count} anvandare, showing {len(display)}")
     return '\n'.join(lines)
 
 
@@ -527,8 +652,9 @@ def forecast_schedule(
     """
     Visa vem som ar schemalagd pa vilka projekt i Forecast.
 
-    Visar planerad allokering (timmar/dag) for varje person och projekt.
-    Forecast ar ett resursplaneringsverktyg kopplat till Harvest.
+    Visar planerad allokering (timmar) for varje person och projekt.
+
+    CONTEXT-TIPS: Returnerar kompakt output (inga tabeller, bara listor).
 
     Args:
         start_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
@@ -550,7 +676,6 @@ def forecast_schedule(
     people = fc.get_people()
     projects = fc.get_projects()
 
-    # Lookup-tabeller
     people_map = {p['id']: p for p in people}
     project_map = {p['id']: p for p in projects}
 
@@ -568,7 +693,7 @@ def _format_forecast_by_person(
     assignments: list, people_map: dict, project_map: dict,
     start_date: str, end_date: str
 ) -> str:
-    """Gruppera Forecast-assignments per person."""
+    """Gruppera Forecast-assignments per person — kompakt format."""
     persons = defaultdict(lambda: {'projects': defaultdict(float), 'total': 0.0})
 
     for a in assignments:
@@ -585,11 +710,9 @@ def _format_forecast_by_person(
         person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}".strip()
         project_name = project.get('name', 'Unknown')
 
-        # allocation i sekunder per dag -> timmar totalt
         alloc_seconds = a.get('allocation', 0) or 0
         alloc_hours_per_day = alloc_seconds / 3600.0
 
-        # Räkna arbetsdagar i assignmentets period (begränsat till sökt intervall)
         a_start = max(a.get('start_date', start_date), start_date)
         a_end = min(a.get('end_date', end_date), end_date)
         work_days = _count_work_days(a_start, a_end)
@@ -600,15 +723,14 @@ def _format_forecast_by_person(
 
     sorted_persons = sorted(persons.items(), key=lambda x: x[1]['total'], reverse=True)
 
-    lines = [f"## Forecast: {start_date} → {end_date}\n"]
+    lines = [f"Forecast: {start_date} -> {end_date}\n"]
 
     for person_name, data in sorted_persons:
-        lines.append(f"### {person_name} — {data['total']:.1f}h planerat")
-        lines.append("| Projekt | Timmar |")
-        lines.append("|---------|--------|")
-        for proj, hours in sorted(data['projects'].items(), key=lambda x: x[1], reverse=True):
-            lines.append(f"| {proj} | {hours:.1f}h |")
-        lines.append("")
+        projs = ', '.join(
+            f"{proj} {hours:.1f}h"
+            for proj, hours in sorted(data['projects'].items(), key=lambda x: x[1], reverse=True)
+        )
+        lines.append(f"**{person_name}** ({data['total']:.1f}h): {projs}")
 
     if not sorted_persons:
         lines.append("Inga assignments hittades for perioden.")
@@ -621,7 +743,7 @@ def _format_forecast_by_project(
     assignments: list, people_map: dict, project_map: dict,
     start_date: str, end_date: str
 ) -> str:
-    """Gruppera Forecast-assignments per projekt."""
+    """Gruppera Forecast-assignments per projekt — kompakt format."""
     projects = defaultdict(lambda: {'persons': defaultdict(float), 'total': 0.0})
 
     for a in assignments:
@@ -651,15 +773,14 @@ def _format_forecast_by_project(
 
     sorted_projects = sorted(projects.items(), key=lambda x: x[1]['total'], reverse=True)
 
-    lines = [f"## Forecast per projekt: {start_date} → {end_date}\n"]
+    lines = [f"Forecast per projekt: {start_date} -> {end_date}\n"]
 
     for proj_name, data in sorted_projects:
-        lines.append(f"### {proj_name} — {data['total']:.1f}h planerat")
-        lines.append("| Person | Timmar |")
-        lines.append("|--------|--------|")
-        for person, hours in sorted(data['persons'].items(), key=lambda x: x[1], reverse=True):
-            lines.append(f"| {person} | {hours:.1f}h |")
-        lines.append("")
+        persons = ', '.join(
+            f"{person} {hours:.1f}h"
+            for person, hours in sorted(data['persons'].items(), key=lambda x: x[1], reverse=True)
+        )
+        lines.append(f"**{proj_name}** ({data['total']:.1f}h): {persons}")
 
     if not sorted_projects:
         lines.append("Inga assignments hittades for perioden.")
@@ -682,101 +803,7 @@ def _count_work_days(start_date: str, end_date: str) -> int:
 
 
 # ======================================================================
-# TOOL 7: Detaljerade tidsposter (med kommentarer)
-# ======================================================================
-
-@mcp.tool()
-def harvest_detailed_time_entries(
-    from_date: str = "",
-    to_date: str = "",
-    project_id: str = "",
-    client_id: str = "",
-    user_id: str = ""
-) -> str:
-    """
-    Visa detaljerade tidsposter med kommentarer/notes.
-
-    Till skillnad fran harvest_time_summary (som visar aggregerade timmar)
-    visar detta verktyg varje enskild tidspost med datum, person, projekt,
-    task och kommentar. Perfekt for att granska vad folk faktiskt gjort
-    eller kontrollera att kommentarer finns.
-
-    Args:
-        from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
-        to_date: Slutdatum YYYY-MM-DD (default: idag)
-        project_id: Filtrera pa projekt-ID (valfritt)
-        client_id: Filtrera pa kund-ID (valfritt)
-        user_id: Filtrera pa person-ID (valfritt)
-    """
-    from_date, to_date = _resolve_dates(from_date, to_date)
-    client = _get_client()
-
-    filters = {}
-    if project_id:
-        filters['project_id'] = project_id
-    if client_id:
-        filters['client_id'] = client_id
-    if user_id:
-        filters['user_id'] = user_id
-
-    entries = client.get_time_entries(from_date, to_date, **filters)
-
-    if not entries:
-        return f"Inga tidsposter hittades for {from_date} \u2192 {to_date} med angivna filter."
-
-    # Sortera: nyast datum forst, sedan person
-    entries.sort(key=lambda e: (
-        e.get('spent_date', ''),
-        (e.get('user', {}) or {}).get('name', '')
-    ), reverse=True)
-
-    lines = [
-        f"## Detaljerade tidsposter: {from_date} \u2192 {to_date}",
-        f"*{len(entries)} poster*\n",
-        "| Datum | Person | Projekt | Task | Timmar | Kommentar |",
-        "|-------|--------|---------|------|--------|-----------|",
-    ]
-
-    total_hours = 0.0
-    missing_notes = 0
-
-    for e in entries:
-        date = e.get('spent_date', '')
-        user = e.get('user', {}) or {}
-        person = user.get('name', 'Unknown')
-        proj = e.get('project', {}) or {}
-        proj_name = proj.get('name', 'Unknown')
-        task = e.get('task', {}) or {}
-        task_name = task.get('name', '')
-        hours = e.get('hours', 0) or 0
-        notes = (e.get('notes') or '').strip()
-
-        total_hours += hours
-        if not notes:
-            missing_notes += 1
-
-        # Trunkera langa kommentarer for tabellformat
-        if len(notes) > 80:
-            notes = notes[:77] + '...'
-        # Escapea pipe-tecken i notes
-        notes = notes.replace('|', '\\|')
-
-        lines.append(
-            f"| {date} | {person} | {proj_name} | {task_name} | {hours:.1f}h | {notes} |"
-        )
-
-    lines.append("")
-    lines.append(f"**Totalt:** {total_hours:.1f}h | **Poster utan kommentar:** {missing_notes} av {len(entries)}")
-
-    logging.info(
-        f"harvest_detailed_time_entries: {from_date} -> {to_date}, "
-        f"{len(entries)} entries, {missing_notes} utan notes"
-    )
-    return '\n'.join(lines)
-
-
-# ======================================================================
-# TOOL 8: Lista tasks för ett projekt
+# TOOL 7: Lista tasks för ett projekt
 # ======================================================================
 
 @mcp.tool()
@@ -797,25 +824,24 @@ def harvest_get_project_tasks(project_id: int) -> str:
         return f"Inga tasks hittades for projekt {project_id}."
 
     lines = [
-        f"## Tasks for projekt {project_id}\n",
-        "| Task ID | Namn | Billable | Aktiv |",
-        "|---------|------|----------|-------|",
+        f"Tasks for projekt {project_id}:\n",
+        "| Task ID | Namn | Billable |",
+        "|---------|------|----------|",
     ]
 
     for a in assignments:
         task = a.get('task', {}) or {}
-        task_id = task.get('id', '—')
+        task_id = task.get('id', '\u2014')
         task_name = task.get('name', 'Unknown')
         billable = 'Ja' if a.get('billable') else 'Nej'
-        active = 'Ja' if a.get('is_active') else 'Nej'
-        lines.append(f"| {task_id} | {task_name} | {billable} | {active} |")
+        lines.append(f"| {task_id} | {task_name} | {billable} |")
 
     logging.info(f"harvest_get_project_tasks: projekt {project_id}, {len(assignments)} tasks")
     return '\n'.join(lines)
 
 
 # ======================================================================
-# TOOL 9: Prepare timesheet (draft)
+# TOOL 8: Prepare timesheet (draft)
 # ======================================================================
 
 @mcp.tool()
@@ -856,7 +882,7 @@ def harvest_prepare_timesheet(entries: str, user_id: int = 0) -> str:
         if not isinstance(entry['hours'], (int, float)) or entry['hours'] <= 0:
             raise ValueError(f"Entry {i}: hours maste vara > 0, fick {entry['hours']}")
 
-    # Hämta projektnamn — EN gång
+    # Hämta projektnamn — EN gång, bara namn
     project_cache = {}
     try:
         projects = client.get_projects(is_active=True)
@@ -906,28 +932,26 @@ def harvest_prepare_timesheet(entries: str, user_id: int = 0) -> str:
     # Bygg preview
     total_hours = sum(e['hours'] for e in validated)
     lines = [
-        f"## Draft: {draft_id}",
-        f"*{len(validated)} poster, {total_hours:.1f}h totalt*\n",
-        "| # | Datum | Projekt | Task | Timmar | Notes |",
-        "|---|-------|---------|------|--------|-------|",
+        f"Draft: {draft_id} | {len(validated)} poster | {total_hours:.1f}h\n",
+        "| # | Datum | Projekt | Task | Tim | Notes |",
+        "|---|-------|---------|------|-----|-------|",
     ]
     for i, e in enumerate(validated, 1):
-        notes_preview = e['notes'][:60] + '...' if len(e['notes']) > 60 else e['notes']
+        notes_preview = e['notes'][:50] + '...' if len(e['notes']) > 50 else e['notes']
         notes_preview = notes_preview.replace('|', '\\|')
         lines.append(
             f"| {i} | {e['spent_date']} | {e['project_name']} | {e['task_name']} | "
-            f"{e['hours']:.1f}h | {notes_preview} |"
+            f"{e['hours']:.1f} | {notes_preview} |"
         )
 
-    lines.append(f"\n**draft_id: `{draft_id}`** — giltig i {_DRAFT_TTL_MINUTES} minuter.")
-    lines.append("Anropa `harvest_commit_timesheet(draft_id)` for att posta till Harvest.")
+    lines.append(f"\ndraft_id: `{draft_id}` — giltig {_DRAFT_TTL_MINUTES} min. Anropa harvest_commit_timesheet(draft_id) for att posta.")
 
     logging.info(f"harvest_prepare_timesheet: draft {draft_id}, {len(validated)} entries, {total_hours:.1f}h")
     return '\n'.join(lines)
 
 
 # ======================================================================
-# TOOL 10: Commit timesheet (draft -> Harvest)
+# TOOL 9: Commit timesheet (draft -> Harvest)
 # ======================================================================
 
 @mcp.tool()
@@ -973,28 +997,26 @@ def harvest_commit_timesheet(draft_id: str) -> str:
             entry_id = result.get('id', '?')
             results.append(f"| {i+1} | {entry['spent_date']} | {entry['project_name']} | {entry['hours']:.1f}h | {entry_id} |")
         except Exception as e:
-            # STOPP — rapportera var det gick fel
-            draft['committed'] = True  # Markera for att forhindra retry
+            draft['committed'] = True
             lines = [
-                f"## Commit AVBRUTEN vid rad {i+1} av {len(draft['entries'])}",
-                f"**Fel:** {e}\n",
+                f"Commit AVBRUTEN vid rad {i+1} av {len(draft['entries'])}",
+                f"Fel: {e}\n",
             ]
             if results:
-                lines.append("Lyckade poster (redan i Harvest):")
-                lines.append("| # | Datum | Projekt | Timmar | Entry ID |")
-                lines.append("|---|-------|---------|--------|----------|")
+                lines.append("Lyckade poster:")
+                lines.append("| # | Datum | Projekt | Tim | Entry ID |")
+                lines.append("|---|-------|---------|-----|----------|")
                 lines.extend(results)
-            lines.append(f"\n**{len(draft['entries']) - i} poster EJ postade.** Korrigera och skapa ny draft.")
+            lines.append(f"\n{len(draft['entries']) - i} poster EJ postade. Korrigera och skapa ny draft.")
             logging.error(f"harvest_commit_timesheet: draft {draft_id} failed at entry {i}: {e}")
             return '\n'.join(lines)
 
     draft['committed'] = True
 
     lines = [
-        f"## Commit klar: {draft_id}",
-        f"*{len(results)} poster postade till Harvest*\n",
-        "| # | Datum | Projekt | Timmar | Entry ID |",
-        "|---|-------|---------|--------|----------|",
+        f"Commit klar: {draft_id} | {len(results)} poster postade\n",
+        "| # | Datum | Projekt | Tim | Entry ID |",
+        "|---|-------|---------|-----|----------|",
     ]
     lines.extend(results)
 
@@ -1003,7 +1025,7 @@ def harvest_commit_timesheet(draft_id: str) -> str:
 
 
 # ======================================================================
-# TOOL 11: Uppdatera tidspost
+# TOOL 10: Uppdatera tidspost
 # ======================================================================
 
 @mcp.tool()
@@ -1048,13 +1070,13 @@ def harvest_update_time_entry(
 
     logging.info(f"harvest_update_time_entry: entry {entry_id} -> {fields}")
     return (
-        f"Tidspost uppdaterad: entry_id={entry_id} | {proj_name} | "
-        f"{updated_hours}h | uppdaterade falt: {', '.join(fields.keys())}"
+        f"Uppdaterad: entry_id={entry_id} | {proj_name} | "
+        f"{updated_hours}h | falt: {', '.join(fields.keys())}"
     )
 
 
 # ======================================================================
-# TOOL 12: Ta bort tidspost
+# TOOL 11: Ta bort tidspost
 # ======================================================================
 
 @mcp.tool()
@@ -1071,7 +1093,116 @@ def harvest_delete_time_entry(entry_id: int) -> str:
     client.delete_time_entry(entry_id)
 
     logging.info(f"harvest_delete_time_entry: entry {entry_id} borttagen")
-    return f"Tidspost borttagen: entry_id={entry_id}"
+    return f"Borttagen: entry_id={entry_id}"
+
+
+# ======================================================================
+# TOOL 12: Self-update från GitHub
+# ======================================================================
+
+# Projektrot (där detta repo bor)
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _run(cmd: list[str], cwd: str = _PROJECT_DIR) -> tuple[int, str]:
+    """Kör subprocess, returnera (returncode, combined output)."""
+    import subprocess
+    result = subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True, timeout=120
+    )
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+@mcp.tool()
+def harvest_self_update() -> str:
+    """
+    Uppdatera HarvestMCP fran GitHub.
+
+    Kollar om det finns nya commits pa origin/main, pullar andringar,
+    och uppdaterar Python-dependencies om requirements.txt andrats.
+
+    Servern behover startas om efter uppdatering (stang och oppna Claude Desktop).
+    """
+    import hashlib
+
+    lines = ["HarvestMCP Self-Update\n"]
+
+    rc, out = _run(['git', 'rev-parse', '--is-inside-work-tree'])
+    if rc != 0:
+        raise RuntimeError(f"Inte ett git-repo: {_PROJECT_DIR}")
+
+    rc, out = _run(['git', 'fetch', 'origin', 'main'])
+    if rc != 0:
+        raise RuntimeError(f"git fetch misslyckades: {out}")
+
+    rc, local_sha = _run(['git', 'rev-parse', 'HEAD'])
+    rc2, remote_sha = _run(['git', 'rev-parse', 'origin/main'])
+    if rc != 0 or rc2 != 0:
+        raise RuntimeError("Kunde inte lasa git SHA")
+
+    local_sha = local_sha.strip()
+    remote_sha = remote_sha.strip()
+
+    if local_sha == remote_sha:
+        lines.append(f"Redan uppdaterad. Commit: {local_sha[:8]}")
+        logging.info("harvest_self_update: already up to date")
+        return '\n'.join(lines)
+
+    rc, log_output = _run([
+        'git', 'log', '--oneline', f'{local_sha}..{remote_sha}'
+    ])
+    commit_count = len(log_output.strip().split('\n')) if log_output.strip() else 0
+    lines.append(f"{commit_count} nya commits:\n{log_output}\n")
+
+    req_path = os.path.join(_PROJECT_DIR, 'requirements.txt')
+    old_req_hash = ""
+    if os.path.exists(req_path):
+        with open(req_path, 'rb') as f:
+            old_req_hash = hashlib.sha256(f.read()).hexdigest()
+
+    rc, out = _run(['git', 'pull', 'origin', 'main'])
+    if rc != 0:
+        lines.append(f"git pull MISSLYCKADES: {out}")
+        logging.error(f"harvest_self_update: git pull failed: {out}")
+        return '\n'.join(lines)
+
+    lines.append("git pull: OK")
+
+    new_req_hash = ""
+    if os.path.exists(req_path):
+        with open(req_path, 'rb') as f:
+            new_req_hash = hashlib.sha256(f.read()).hexdigest()
+
+    if new_req_hash != old_req_hash:
+        venv_pip = os.path.join(_PROJECT_DIR, 'venv', 'bin', 'pip')
+        if os.path.exists(venv_pip):
+            rc, out = _run([venv_pip, 'install', '-r', req_path, '--quiet'])
+            if rc != 0:
+                lines.append(f"pip install MISSLYCKADES: {out}")
+                logging.error(f"harvest_self_update: pip install failed: {out}")
+                return '\n'.join(lines)
+            lines.append("Dependencies: uppdaterade")
+
+            hash_file = os.path.join(_PROJECT_DIR, 'venv', '.requirements_hash')
+            with open(hash_file, 'w') as f:
+                import subprocess
+                shasum = subprocess.run(
+                    ['shasum', req_path], capture_output=True, text=True
+                ).stdout.split()[0]
+                f.write(shasum)
+        else:
+            lines.append("Dependencies: requirements.txt andrades men venv/bin/pip saknas — kor ./install.sh")
+    else:
+        lines.append("Dependencies: oforandrade")
+
+    rc, diff_stat = _run(['git', 'diff', '--stat', f'{local_sha}..HEAD'])
+    if diff_stat:
+        lines.append(f"Andrade filer:\n{diff_stat}")
+
+    lines.append("\nStarta om Claude Desktop for att ladda den uppdaterade servern.")
+
+    logging.info(f"harvest_self_update: updated {local_sha[:8]} -> {remote_sha[:8]}, {commit_count} commits")
+    return '\n'.join(lines)
 
 
 # ======================================================================
