@@ -231,6 +231,19 @@ class TestFormatSummary:
         result = _format_summary(entries, "2026-02-16", "2026-02-16", 30)
         assert "15,000 SEK" in result
 
+    def test_persons_count_not_names(self):
+        """Summary mode should show person COUNT, not list of names."""
+        entries = [
+            _make_time_entry(user_name="Anna", hours=5),
+            _make_time_entry(user_name="Bo", hours=3),
+            _make_time_entry(user_name="Clara", hours=2),
+        ]
+        result = _format_summary(entries, "2026-02-16", "2026-02-16", 30)
+        assert "| Pers |" in result
+        assert "| 3 |" in result
+        # Should NOT list individual names in summary mode
+        assert "Anna" not in result
+
 
 class TestFormatByProject:
     def test_grouped(self):
@@ -381,6 +394,34 @@ class TestHarvestTeamUtilization:
 
         result = harvest_mcp.harvest_team_utilization("2026-02-16", "2026-02-22")
         assert "Team Utilization" in result
+
+    def test_max_rows(self, mock_harvest_client):
+        mock_harvest_client.get_report_time_by_team.return_value = [
+            _make_team_report_entry(user_id=i, user_name=f"Person{i}", billable_hours=10, total_hours=20)
+            for i in range(10)
+        ]
+        mock_harvest_client.get_users.return_value = [
+            _make_user(user_id=i, first_name=f"Person{i}") for i in range(10)
+        ]
+
+        result = harvest_mcp.harvest_team_utilization("2026-02-16", "2026-02-22", max_rows=3)
+        assert "Visar 3 av 10" in result
+        # Totals row should still be present
+        assert "**Totalt**" in result
+
+    def test_max_rows_zero_shows_all(self, mock_harvest_client):
+        mock_harvest_client.get_report_time_by_team.return_value = [
+            _make_team_report_entry(user_id=i, user_name=f"Person{i}")
+            for i in range(5)
+        ]
+        mock_harvest_client.get_users.return_value = [
+            _make_user(user_id=i, first_name=f"Person{i}") for i in range(5)
+        ]
+
+        result = harvest_mcp.harvest_team_utilization("2026-02-16", "2026-02-22", max_rows=0)
+        assert "Visar" not in result
+        for i in range(5):
+            assert f"Person{i}" in result
 
 
 class TestHarvestTimeSummary:
@@ -730,6 +771,36 @@ class TestForecastSchedule:
 
         result = harvest_mcp.forecast_schedule("2026-02-16", "2026-02-20")
         assert "Inga assignments" in result
+
+    def test_max_rows_by_person(self, mock_forecast_client):
+        mock_forecast_client.get_assignments.return_value = [
+            _make_forecast_assignment(person_id=i, project_id=10, allocation_h=8)
+            for i in range(1, 11)
+        ]
+        mock_forecast_client.get_people.return_value = [
+            _make_forecast_person(i, f"Person{i}") for i in range(1, 11)
+        ]
+        mock_forecast_client.get_projects.return_value = [_make_forecast_project(10)]
+
+        result = harvest_mcp.forecast_schedule(
+            "2026-02-16", "2026-02-20", group_by="person", max_rows=3
+        )
+        assert "Visar 3 av 10" in result
+
+    def test_max_rows_by_project(self, mock_forecast_client):
+        mock_forecast_client.get_assignments.return_value = [
+            _make_forecast_assignment(person_id=1, project_id=i, allocation_h=8)
+            for i in range(10, 20)
+        ]
+        mock_forecast_client.get_people.return_value = [_make_forecast_person(1)]
+        mock_forecast_client.get_projects.return_value = [
+            _make_forecast_project(i, f"Proj{i}") for i in range(10, 20)
+        ]
+
+        result = harvest_mcp.forecast_schedule(
+            "2026-02-16", "2026-02-20", group_by="project", max_rows=3
+        )
+        assert "Visar 3 av 10" in result
 
 
 class TestHarvestGetProjectTasks:

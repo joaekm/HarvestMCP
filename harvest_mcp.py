@@ -163,7 +163,11 @@ def _truncation_note(shown: int, total: int) -> str:
 # ======================================================================
 
 @mcp.tool()
-def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
+def harvest_team_utilization(
+    from_date: str = "",
+    to_date: str = "",
+    max_rows: int = _DEFAULT_MAX_ROWS
+) -> str:
     """
     Visa teamets belaggning och utilization for en period.
 
@@ -176,6 +180,7 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
     Args:
         from_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
         to_date: Slutdatum YYYY-MM-DD (default: idag)
+        max_rows: Max antal personer att visa (default 30, 0=alla)
     """
     from_date, to_date = _resolve_dates(from_date, to_date)
     client = _get_client()
@@ -224,6 +229,8 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
         total_capacity += period_cap
 
     rows.sort(key=lambda r: r['util'], reverse=True)
+    total_count = len(rows)
+    display = rows if (max_rows == 0) else rows[:max_rows]
 
     lines = [
         f"Team Utilization: {from_date} -> {to_date} ({weeks:.1f} veckor)\n",
@@ -231,7 +238,7 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
         "|--------|----------|----------|--------|-----------|-------|",
     ]
 
-    for r in rows:
+    for r in display:
         lines.append(
             f"| {r['name']} | {r['billable']:.1f}h | {r['nonbill']:.1f}h | "
             f"{r['total']:.1f}h | {r['capacity']:.1f}h | {r['util']:.0f}% |"
@@ -242,6 +249,9 @@ def harvest_team_utilization(from_date: str = "", to_date: str = "") -> str:
         f"| **Totalt** | **{total_billable:.1f}h** | **{total_nonbill:.1f}h** | "
         f"**{total_hours:.1f}h** | **{total_capacity:.1f}h** | **{avg_util:.0f}%** |"
     )
+
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
 
     logging.info(f"harvest_team_utilization: {from_date} -> {to_date}, {len(rows)} personer")
     return '\n'.join(lines)
@@ -351,17 +361,17 @@ def _format_summary(entries: list, from_date: str, to_date: str, max_rows: int) 
         lines[0] += f" | Belopp: {billable_amount:,.0f} SEK"
 
     lines.append("")
-    lines.append("| Projekt | Timmar | Billable | Personer |")
-    lines.append("|---------|--------|----------|----------|")
+    lines.append("| Projekt | Timmar | Billable | Pers |")
+    lines.append("|---------|--------|----------|------|")
 
     sorted_projects = sorted(by_project.items(), key=lambda x: x[1]['hours'], reverse=True)
     total_count = len(sorted_projects)
     display = sorted_projects if (max_rows == 0) else sorted_projects[:max_rows]
 
     for proj_name, data in display:
-        persons_str = ', '.join(sorted(data['persons']))
+        num_persons = len(data['persons'])
         lines.append(
-            f"| {proj_name} | {data['hours']:.1f}h | {data['billable_hours']:.1f}h | {persons_str} |"
+            f"| {proj_name} | {data['hours']:.1f}h | {data['billable_hours']:.1f}h | {num_persons} |"
         )
 
     if max_rows and total_count > max_rows:
@@ -741,7 +751,8 @@ def harvest_list_users(active_only: bool = True, max_rows: int = 0) -> str:
 def forecast_schedule(
     start_date: str = "",
     end_date: str = "",
-    group_by: str = "person"
+    group_by: str = "person",
+    max_rows: int = _DEFAULT_MAX_ROWS
 ) -> str:
     """
     Visa vem som ar schemalagd pa vilka projekt i Forecast.
@@ -754,6 +765,7 @@ def forecast_schedule(
         start_date: Startdatum YYYY-MM-DD (default: mandagen denna vecka)
         end_date: Slutdatum YYYY-MM-DD (default: fredagen denna vecka)
         group_by: "person" (vilka projekt per person) eller "project" (vilka personer per projekt)
+        max_rows: Max antal rader i output (default 30, 0=alla)
     """
     today = datetime.now().date()
     if not start_date:
@@ -775,17 +787,17 @@ def forecast_schedule(
 
     if group_by == "project":
         return _format_forecast_by_project(
-            assignments, people_map, project_map, start_date, end_date
+            assignments, people_map, project_map, start_date, end_date, max_rows
         )
     else:
         return _format_forecast_by_person(
-            assignments, people_map, project_map, start_date, end_date
+            assignments, people_map, project_map, start_date, end_date, max_rows
         )
 
 
 def _format_forecast_by_person(
     assignments: list, people_map: dict, project_map: dict,
-    start_date: str, end_date: str
+    start_date: str, end_date: str, max_rows: int = 0
 ) -> str:
     """Gruppera Forecast-assignments per person — kompakt format."""
     persons = defaultdict(lambda: {'projects': defaultdict(float), 'total': 0.0})
@@ -816,10 +828,12 @@ def _format_forecast_by_person(
         persons[person_name]['total'] += total_hours
 
     sorted_persons = sorted(persons.items(), key=lambda x: x[1]['total'], reverse=True)
+    total_count = len(sorted_persons)
+    display = sorted_persons if (max_rows == 0) else sorted_persons[:max_rows]
 
     lines = [f"Forecast: {start_date} -> {end_date}\n"]
 
-    for person_name, data in sorted_persons:
+    for person_name, data in display:
         projs = ', '.join(
             f"{proj} {hours:.1f}h"
             for proj, hours in sorted(data['projects'].items(), key=lambda x: x[1], reverse=True)
@@ -829,13 +843,16 @@ def _format_forecast_by_person(
     if not sorted_persons:
         lines.append("Inga assignments hittades for perioden.")
 
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
+
     logging.info(f"forecast_schedule(person): {start_date} -> {end_date}, {len(sorted_persons)} personer")
     return '\n'.join(lines)
 
 
 def _format_forecast_by_project(
     assignments: list, people_map: dict, project_map: dict,
-    start_date: str, end_date: str
+    start_date: str, end_date: str, max_rows: int = 0
 ) -> str:
     """Gruppera Forecast-assignments per projekt — kompakt format."""
     projects = defaultdict(lambda: {'persons': defaultdict(float), 'total': 0.0})
@@ -866,10 +883,12 @@ def _format_forecast_by_project(
         projects[project_name]['total'] += total_hours
 
     sorted_projects = sorted(projects.items(), key=lambda x: x[1]['total'], reverse=True)
+    total_count = len(sorted_projects)
+    display = sorted_projects if (max_rows == 0) else sorted_projects[:max_rows]
 
     lines = [f"Forecast per projekt: {start_date} -> {end_date}\n"]
 
-    for proj_name, data in sorted_projects:
+    for proj_name, data in display:
         persons = ', '.join(
             f"{person} {hours:.1f}h"
             for person, hours in sorted(data['persons'].items(), key=lambda x: x[1], reverse=True)
@@ -878,6 +897,9 @@ def _format_forecast_by_project(
 
     if not sorted_projects:
         lines.append("Inga assignments hittades for perioden.")
+
+    if max_rows and total_count > max_rows:
+        lines.append(_truncation_note(max_rows, total_count))
 
     logging.info(f"forecast_schedule(project): {start_date} -> {end_date}, {len(sorted_projects)} projekt")
     return '\n'.join(lines)
