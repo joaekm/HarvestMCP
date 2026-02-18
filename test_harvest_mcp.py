@@ -601,6 +601,45 @@ class TestHarvestFindProject:
         lines = result.strip().split('\n')
         assert len(lines) == 1
 
+    def test_active_only_false(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "Gammalt Projekt", "Kund A"),
+        ]
+        harvest_mcp.harvest_find_project("gammalt", active_only=False)
+        mock_harvest_client.get_projects.assert_called_with(is_active=False)
+
+    def test_active_only_default_true(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = []
+        harvest_mcp.harvest_find_project("test")
+        mock_harvest_client.get_projects.assert_called_with(is_active=True)
+
+    def test_no_match_hint_when_active_only(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = []
+        result = harvest_mcp.harvest_find_project("xyz", active_only=True)
+        assert "active_only=false" in result
+
+    def test_no_match_no_hint_when_all(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = []
+        result = harvest_mcp.harvest_find_project("xyz", active_only=False)
+        assert "active_only=false" not in result
+
+    def test_inactive_marker_shown(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            {**_make_project(100, "Old Proj", "Kund A"), 'is_active': False},
+            {**_make_project(200, "Active Proj", "Kund B"), 'is_active': True},
+        ]
+        result = harvest_mcp.harvest_find_project("proj", active_only=False)
+        assert "[inaktiv]" in result
+        assert "[aktiv]" in result
+
+    def test_no_marker_when_active_only(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "Proj A", "Kund X"),
+        ]
+        result = harvest_mcp.harvest_find_project("proj", active_only=True)
+        assert "[aktiv]" not in result
+        assert "[inaktiv]" not in result
+
 
 class TestHarvestFindUser:
     def test_match(self, mock_harvest_client):
@@ -637,6 +676,28 @@ class TestHarvestFindUser:
         assert "| ID |" not in result
         lines = result.strip().split('\n')
         assert len(lines) == 1
+
+    def test_active_only_false(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = [
+            _make_user(1, "Anna", "Andersson"),
+        ]
+        harvest_mcp.harvest_find_user("anna", active_only=False)
+        mock_harvest_client.get_users.assert_called_with(is_active=False)
+
+    def test_active_only_default_true(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = []
+        harvest_mcp.harvest_find_user("test")
+        mock_harvest_client.get_users.assert_called_with(is_active=True)
+
+    def test_no_match_hint_when_active_only(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = []
+        result = harvest_mcp.harvest_find_user("xyz", active_only=True)
+        assert "active_only=false" in result
+
+    def test_no_match_no_hint_when_all(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = []
+        result = harvest_mcp.harvest_find_user("xyz", active_only=False)
+        assert "active_only=false" not in result
 
 
 class TestForecastSchedule:

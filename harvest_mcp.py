@@ -71,6 +71,8 @@ STRATEGI — minimera context-forbrukning:
 1. Borja med harvest_team_utilization eller harvest_time_summary (group_by="summary") for oversikt.
 2. Anvand filter (project_id, user_id, datumintervall) for att begränsa data.
 3. For att hitta ID: anvand harvest_find_project("namn") eller harvest_find_user("namn") — INTE list-verktygen.
+   - Soker default bara aktiva. Om inget hittas, prova active_only=false.
+   - Anvand ALDRIG harvest_list_projects/harvest_list_users for ID-lookup — de returnerar tusentals rader.
 4. Anropa harvest_detailed_time_entries BARA nar du behover enskilda poster eller entry_id.
 5. Lat max_rows vara default (30). Oka bara om anvandaren explicit behover mer.
 6. For tidrapportering: prepare -> granska -> commit. Alla poster via harvest_prepare_timesheet forst.
@@ -560,7 +562,7 @@ def _fuzzy_match(query: str, text: str) -> bool:
 
 
 @mcp.tool()
-def harvest_find_project(query: str) -> str:
+def harvest_find_project(query: str, active_only: bool = True) -> str:
     """
     Sok projekt pa namn (fuzzy). Returnerar matchande projekt med ID.
 
@@ -568,11 +570,15 @@ def harvest_find_project(query: str) -> str:
     behover hitta ett projekt-ID. Returnerar bara matchande rader.
     Exempel: harvest_find_project("besqab") -> ID, namn, kund.
 
+    Om sokningen inte ger resultat med aktiva projekt, prova active_only=false
+    for att inkludera avslutade/inaktiva projekt.
+
     Args:
         query: Sokord (matchar delstrang i projektnamn eller kundnamn, case-insensitive)
+        active_only: Bara aktiva projekt (default: True). Satt till False for att soka bland alla.
     """
     client = _get_client()
-    projects = client.get_projects(is_active=True)
+    projects = client.get_projects(is_active=active_only)
 
     matches = []
     for p in projects:
@@ -582,14 +588,16 @@ def harvest_find_project(query: str) -> str:
             matches.append(p)
 
     if not matches:
-        return f"Inga projekt matchade '{query}'."
+        hint = " Prova active_only=false for att inkludera inaktiva projekt." if active_only else ""
+        return f"Inga projekt matchade '{query}'.{hint}"
 
     lines = []
     for p in sorted(matches, key=lambda x: x.get('name', '')):
         client_name = (p.get('client') or {}).get('name', '')
-        lines.append(f"{p['id']} | {p['name']} | {client_name}")
+        active_marker = "" if active_only else (" [aktiv]" if p.get('is_active') else " [inaktiv]")
+        lines.append(f"{p['id']} | {p['name']} | {client_name}{active_marker}")
 
-    logging.info(f"harvest_find_project: query='{query}', {len(matches)} matchningar")
+    logging.info(f"harvest_find_project: query='{query}', active_only={active_only}, {len(matches)} matchningar")
     return '\n'.join(lines)
 
 
@@ -598,7 +606,7 @@ def harvest_find_project(query: str) -> str:
 # ======================================================================
 
 @mcp.tool()
-def harvest_find_user(query: str) -> str:
+def harvest_find_user(query: str, active_only: bool = True) -> str:
     """
     Sok anvandare pa namn (fuzzy). Returnerar matchande anvandare med ID.
 
@@ -606,11 +614,14 @@ def harvest_find_user(query: str) -> str:
     behover hitta ett user-ID. Returnerar bara matchande rader.
     Exempel: harvest_find_user("anna") -> ID, namn, kapacitet.
 
+    Om sokningen inte ger resultat med aktiva anvandare, prova active_only=false.
+
     Args:
         query: Sokord (matchar delstrang i for- eller efternamn, case-insensitive)
+        active_only: Bara aktiva anvandare (default: True). Satt till False for att soka bland alla.
     """
     client = _get_client()
-    users = client.get_users(is_active=True)
+    users = client.get_users(is_active=active_only)
 
     matches = []
     for u in users:
@@ -619,15 +630,17 @@ def harvest_find_user(query: str) -> str:
             matches.append(u)
 
     if not matches:
-        return f"Inga anvandare matchade '{query}'."
+        hint = " Prova active_only=false for att inkludera inaktiva anvandare." if active_only else ""
+        return f"Inga anvandare matchade '{query}'.{hint}"
 
     lines = []
     for u in sorted(matches, key=lambda x: x.get('first_name', '')):
         name = f"{u.get('first_name', '')} {u.get('last_name', '')}"
         cap_h = (u.get('weekly_capacity', 0) or 0) / 3600
-        lines.append(f"{u['id']} | {name} | {cap_h:.0f}h/v")
+        active_marker = "" if active_only else (" [aktiv]" if u.get('is_active') else " [inaktiv]")
+        lines.append(f"{u['id']} | {name} | {cap_h:.0f}h/v{active_marker}")
 
-    logging.info(f"harvest_find_user: query='{query}', {len(matches)} matchningar")
+    logging.info(f"harvest_find_user: query='{query}', active_only={active_only}, {len(matches)} matchningar")
     return '\n'.join(lines)
 
 

@@ -23,7 +23,8 @@ Folj dessa regler for att minimera token-forbrukning:
 4. **Anvand find-verktygen for ID-lookup — INTE list-verktygen**
    - `harvest_find_project("besqab")` → returnerar bara matchande projekt (1-2 rader)
    - `harvest_find_user("anna")` → returnerar bara matchande anvandare (1-2 rader)
-   - `harvest_list_projects`/`harvest_list_users` — BARA om du behover HELA listan
+   - Soker default bara aktiva. Om inget hittas: prova `active_only=false`
+   - Anvand ALDRIG `harvest_list_projects`/`harvest_list_users` for ID-lookup — de returnerar tusentals rader
 
 5. **Valj ratt group_by i harvest_time_summary**
    - "summary" (default): minst output, en rad per projekt
@@ -93,10 +94,10 @@ python3 harvest_mcp.py
 
 | Verktyg | Beskrivning | Context-kostnad |
 |---------|-------------|-----------------|
-| harvest_find_project | Fuzzy-sok projekt pa namn/kund → ID (1-3 rader) | MINIMAL |
-| harvest_find_user | Fuzzy-sok anvandare pa namn → ID (1-3 rader) | MINIMAL |
-| harvest_list_projects | Lista ALLA projekt (anvand find forst) | Medel |
-| harvest_list_users | Lista ALLA anvandare (anvand find forst) | Lag-medel |
+| harvest_find_project | Fuzzy-sok projekt pa namn/kund → ID. Stodjer active_only=false | MINIMAL |
+| harvest_find_user | Fuzzy-sok anvandare pa namn → ID. Stodjer active_only=false | MINIMAL |
+| harvest_list_projects | Lista ALLA projekt — UNDVIK for ID-lookup | HOG (tusentals rader) |
+| harvest_list_users | Lista ALLA anvandare — UNDVIK for ID-lookup | Medel |
 | harvest_get_project_tasks | Tasks for ett projekt (behovs for task_id) | Lag |
 
 ### Skrivoperationer
