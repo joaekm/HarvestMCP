@@ -70,8 +70,8 @@ Harvest- och Forecast-verktyg for tidsrapportering och resursplanering.
 STRATEGI — minimera context-forbrukning:
 1. Borja med harvest_team_utilization eller harvest_time_summary (group_by="summary") for oversikt.
 2. Anvand filter (project_id, user_id, datumintervall) for att begränsa data.
-3. Anropa harvest_detailed_time_entries BARA nar du behover enskilda poster eller entry_id.
-4. Anropa harvest_list_projects/harvest_list_users bara om du saknar ID — cacha resultaten.
+3. For att hitta ID: anvand harvest_find_project("namn") eller harvest_find_user("namn") — INTE list-verktygen.
+4. Anropa harvest_detailed_time_entries BARA nar du behover enskilda poster eller entry_id.
 5. Lat max_rows vara default (30). Oka bara om anvandaren explicit behover mer.
 6. For tidrapportering: prepare -> granska -> commit. Alla poster via harvest_prepare_timesheet forst.
 """.strip()
@@ -551,16 +551,97 @@ def harvest_detailed_time_entries(
 
 
 # ======================================================================
-# TOOL 4: Lista projekt (hjälpverktyg)
+# TOOL 4a: Fuzzy-sok projekt (BILLIGT — anvand detta for ID-lookup)
+# ======================================================================
+
+def _fuzzy_match(query: str, text: str) -> bool:
+    """Case-insensitive substring-matchning."""
+    return query.lower() in text.lower()
+
+
+@mcp.tool()
+def harvest_find_project(query: str) -> str:
+    """
+    Sok projekt pa namn (fuzzy). Returnerar matchande projekt med ID.
+
+    CONTEXT-TIPS: Anvand DETTA istallet for harvest_list_projects nar du
+    behover hitta ett projekt-ID. Returnerar bara matchande rader.
+    Exempel: harvest_find_project("besqab") -> ID, namn, kund.
+
+    Args:
+        query: Sokord (matchar delstrang i projektnamn eller kundnamn, case-insensitive)
+    """
+    client = _get_client()
+    projects = client.get_projects(is_active=True)
+
+    matches = []
+    for p in projects:
+        proj_name = p.get('name', '')
+        client_name = (p.get('client') or {}).get('name', '')
+        if _fuzzy_match(query, proj_name) or _fuzzy_match(query, client_name):
+            matches.append(p)
+
+    if not matches:
+        return f"Inga projekt matchade '{query}'."
+
+    lines = []
+    for p in sorted(matches, key=lambda x: x.get('name', '')):
+        client_name = (p.get('client') or {}).get('name', '')
+        lines.append(f"{p['id']} | {p['name']} | {client_name}")
+
+    logging.info(f"harvest_find_project: query='{query}', {len(matches)} matchningar")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 4b: Fuzzy-sok anvandare (BILLIGT — anvand detta for ID-lookup)
+# ======================================================================
+
+@mcp.tool()
+def harvest_find_user(query: str) -> str:
+    """
+    Sok anvandare pa namn (fuzzy). Returnerar matchande anvandare med ID.
+
+    CONTEXT-TIPS: Anvand DETTA istallet for harvest_list_users nar du
+    behover hitta ett user-ID. Returnerar bara matchande rader.
+    Exempel: harvest_find_user("anna") -> ID, namn, kapacitet.
+
+    Args:
+        query: Sokord (matchar delstrang i for- eller efternamn, case-insensitive)
+    """
+    client = _get_client()
+    users = client.get_users(is_active=True)
+
+    matches = []
+    for u in users:
+        full_name = f"{u.get('first_name', '')} {u.get('last_name', '')}"
+        if _fuzzy_match(query, full_name):
+            matches.append(u)
+
+    if not matches:
+        return f"Inga anvandare matchade '{query}'."
+
+    lines = []
+    for u in sorted(matches, key=lambda x: x.get('first_name', '')):
+        name = f"{u.get('first_name', '')} {u.get('last_name', '')}"
+        cap_h = (u.get('weekly_capacity', 0) or 0) / 3600
+        lines.append(f"{u['id']} | {name} | {cap_h:.0f}h/v")
+
+    logging.info(f"harvest_find_user: query='{query}', {len(matches)} matchningar")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 4c: Lista alla projekt (DYRT — anvand harvest_find_project forst)
 # ======================================================================
 
 @mcp.tool()
 def harvest_list_projects(active_only: bool = True, max_rows: int = 0) -> str:
     """
-    Lista Harvest-projekt med kund, status och budget-typ.
+    Lista ALLA Harvest-projekt. DYRT — returnerar hela listan.
 
-    CONTEXT-TIPS: Anvands for att hitta projekt-ID att filtrera med.
-    Om du redan vet projekt-ID, skip detta och anropa direkt med filtret.
+    CONTEXT-TIPS: Anvand harvest_find_project(query) istallet om du soker
+    ett specifikt projekt. Anvand bara detta for att visa hela listan.
 
     Args:
         active_only: Visa bara aktiva projekt (default: True)
@@ -602,10 +683,10 @@ def harvest_list_projects(active_only: bool = True, max_rows: int = 0) -> str:
 @mcp.tool()
 def harvest_list_users(active_only: bool = True, max_rows: int = 0) -> str:
     """
-    Lista Harvest-anvandare med roll och veckokapacitet.
+    Lista ALLA Harvest-anvandare. DYRT — returnerar hela listan.
 
-    CONTEXT-TIPS: Anvands for att hitta user-ID att filtrera med.
-    Om du redan vet user-ID, skip detta och anropa direkt med filtret.
+    CONTEXT-TIPS: Anvand harvest_find_user(query) istallet om du soker
+    en specifik person. Anvand bara detta for att visa hela listan.
 
     Args:
         active_only: Visa bara aktiva anvandare (default: True)

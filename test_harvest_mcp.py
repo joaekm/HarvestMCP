@@ -47,6 +47,7 @@ with patch('harvest_auth.load_config', return_value=_FAKE_CONFIG):
                 _weeks_in_range,
                 _truncation_note,
                 _count_work_days,
+                _fuzzy_match,
                 _format_summary,
                 _format_by_project,
                 _format_by_person,
@@ -533,6 +534,109 @@ class TestHarvestListUsers:
         mock_harvest_client.get_users.return_value = []
         result = harvest_mcp.harvest_list_users()
         assert "Inga anvandare" in result
+
+
+class TestFuzzyMatch:
+    def test_exact(self):
+        assert _fuzzy_match("Besqab", "Besqab") is True
+
+    def test_case_insensitive(self):
+        assert _fuzzy_match("besqab", "Besqab Projekt") is True
+
+    def test_substring(self):
+        assert _fuzzy_match("proj", "Stort Projekt AB") is True
+
+    def test_no_match(self):
+        assert _fuzzy_match("xyz", "Besqab") is False
+
+
+class TestHarvestFindProject:
+    def test_match_by_name(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "Besqab Nyproduktion", "Besqab AB"),
+            _make_project(200, "Internt Projekt", "Eget"),
+        ]
+        result = harvest_mcp.harvest_find_project("besqab")
+        assert "100" in result
+        assert "Besqab Nyproduktion" in result
+        assert "Internt" not in result
+
+    def test_match_by_client(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "Webbplats", "Acme AB"),
+            _make_project(200, "App", "Beta Corp"),
+        ]
+        result = harvest_mcp.harvest_find_project("acme")
+        assert "100" in result
+        assert "Webbplats" in result
+        assert "App" not in result
+
+    def test_multiple_matches(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "AI Connector", "Kund A"),
+            _make_project(200, "AI Platform", "Kund B"),
+            _make_project(300, "Webbshop", "Kund C"),
+        ]
+        result = harvest_mcp.harvest_find_project("ai")
+        assert "100" in result
+        assert "200" in result
+        assert "300" not in result
+
+    def test_no_match(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "Projekt A"),
+        ]
+        result = harvest_mcp.harvest_find_project("xyz")
+        assert "Inga projekt matchade" in result
+
+    def test_compact_output(self, mock_harvest_client):
+        mock_harvest_client.get_projects.return_value = [
+            _make_project(100, "Proj A", "Kund X"),
+        ]
+        result = harvest_mcp.harvest_find_project("proj")
+        # Should NOT contain markdown table headers
+        assert "| ID |" not in result
+        assert "|---" not in result
+        # Should be minimal: just id | name | client per line
+        lines = result.strip().split('\n')
+        assert len(lines) == 1
+
+
+class TestHarvestFindUser:
+    def test_match(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = [
+            _make_user(1, "Anna", "Andersson"),
+            _make_user(2, "Bo", "Berg"),
+        ]
+        result = harvest_mcp.harvest_find_user("anna")
+        assert "1" in result
+        assert "Anna" in result
+        assert "Bo" not in result
+
+    def test_match_lastname(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = [
+            _make_user(1, "Anna", "Andersson"),
+            _make_user(2, "Bo", "Berg"),
+        ]
+        result = harvest_mcp.harvest_find_user("berg")
+        assert "2" in result
+        assert "Bo" in result
+
+    def test_no_match(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = [
+            _make_user(1, "Anna", "Andersson"),
+        ]
+        result = harvest_mcp.harvest_find_user("xyz")
+        assert "Inga anvandare matchade" in result
+
+    def test_compact_output(self, mock_harvest_client):
+        mock_harvest_client.get_users.return_value = [
+            _make_user(1, "Anna", "Andersson"),
+        ]
+        result = harvest_mcp.harvest_find_user("anna")
+        assert "| ID |" not in result
+        lines = result.strip().split('\n')
+        assert len(lines) == 1
 
 
 class TestForecastSchedule:
