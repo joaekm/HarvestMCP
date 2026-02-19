@@ -58,6 +58,8 @@ HarvestMCP/
   requirements.txt     # Python-beroenden
   skills/                        # Claude Code skills
     tidrapport/SKILL.md          # /tidrapport — automatisk tidrapportering
+    drive-forecast/SKILL.md      # /drive-forecast — kundprognos Drive-teamet
+    drive-budget/SKILL.md        # /drive-budget — veckovis budgetcykel Drive
 ```
 
 ## Kommandon
@@ -144,6 +146,8 @@ Arbetssatt vid andring av en skill:
 | Skill | Beskrivning |
 |-------|-------------|
 | /tidrapport | Bygger och postar veckans tidrapport via Forecast + MyMemory |
+| /drive-forecast | Korsrefererar Harvest/Forecast mot MyMemory for Drive-teamet |
+| /drive-budget | Veckovis budgetuppfoljning och prognos for Drive-enheten |
 
 ## Regler
 
