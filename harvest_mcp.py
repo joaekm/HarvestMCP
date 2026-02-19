@@ -76,6 +76,7 @@ STRATEGI — minimera context-forbrukning:
 4. Anropa harvest_detailed_time_entries BARA nar du behover enskilda poster eller entry_id.
 5. Lat max_rows vara default (30). Oka bara om anvandaren explicit behover mer.
 6. For tidrapportering: prepare -> granska -> commit. Alla poster via harvest_prepare_timesheet forst.
+7. For team/roller: harvest_list_teams() for oversikt, harvest_get_team("namn") for medlemmar.
 """.strip()
 
 mcp = FastMCP("HarvestReports", instructions=_INSTRUCTIONS)
@@ -957,7 +958,99 @@ def harvest_get_project_tasks(project_id: int) -> str:
 
 
 # ======================================================================
-# TOOL 8: Prepare timesheet (draft)
+# TOOL 8: Lista team/roller
+# ======================================================================
+
+@mcp.tool()
+def harvest_list_teams() -> str:
+    """
+    Lista alla team (roller) i Harvest med antal medlemmar.
+
+    Harvest-roller motsvarar team. Returnerar kompakt oversikt:
+    roll-ID, namn och antal personer.
+
+    CONTEXT-TIPS: Billigt verktyg — en rad per roll.
+    Anvand harvest_get_team(query) for att se medlemmarna i ett specifikt team.
+    """
+    client = _get_client()
+    roles = client.get_roles()
+
+    if not roles:
+        return "Inga roller/team hittades."
+
+    sorted_roles = sorted(roles, key=lambda r: r.get('name', ''))
+
+    lines = [
+        f"Team/roller: {len(sorted_roles)} st\n",
+        "| ID | Team | Medlemmar |",
+        "|----|------|-----------|",
+    ]
+
+    for r in sorted_roles:
+        count = len(r.get('user_ids', []))
+        lines.append(f"| {r['id']} | {r['name']} | {count} |")
+
+    logging.info(f"harvest_list_teams: {len(sorted_roles)} roller")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 9: Visa teammedlemmar
+# ======================================================================
+
+@mcp.tool()
+def harvest_get_team(query: str) -> str:
+    """
+    Sok team pa namn (fuzzy) och visa dess medlemmar.
+
+    Returnerar teamnamn och alla medlemmar med ID, namn och kapacitet.
+
+    CONTEXT-TIPS: Anvand harvest_list_teams() forst for att se alla team,
+    sedan detta verktyg for att se medlemmarna i ett specifikt team.
+
+    Args:
+        query: Sokord (matchar delstrang i rollnamn, case-insensitive)
+    """
+    client = _get_client()
+    roles = client.get_roles()
+
+    matches = [r for r in roles if _fuzzy_match(query, r.get('name', ''))]
+
+    if not matches:
+        return f"Inget team matchade '{query}'. Anvand harvest_list_teams() for att se alla."
+
+    # Hämta alla aktiva + inaktiva users för att kunna resolve:a user_ids
+    users = client.get_users(is_active=True)
+    inactive_users = client.get_users(is_active=False)
+    user_map = {}
+    for u in users + inactive_users:
+        user_map[u['id']] = u
+
+    lines = []
+    for role in matches:
+        member_ids = role.get('user_ids', [])
+        lines.append(f"**{role['name']}** (id={role['id']}, {len(member_ids)} medlemmar)\n")
+        lines.append("| ID | Namn | Kapacitet | Aktiv |")
+        lines.append("|----|------|-----------|-------|")
+
+        for uid in sorted(member_ids):
+            u = user_map.get(uid)
+            if u:
+                name = f"{u.get('first_name', '')} {u.get('last_name', '')}"
+                cap_h = (u.get('weekly_capacity', 0) or 0) / 3600
+                active = "Ja" if u.get('is_active') else "Nej"
+                lines.append(f"| {uid} | {name} | {cap_h:.0f}h/v | {active} |")
+            else:
+                lines.append(f"| {uid} | (okand) | — | — |")
+
+        lines.append("")
+
+    logging.info(f"harvest_get_team: query='{query}', {len(matches)} matchningar")
+    return '\n'.join(lines)
+
+
+# ======================================================================
+# TOOL 10: Prepare timesheet (draft)
 # ======================================================================
 
 @mcp.tool()
@@ -1067,7 +1160,7 @@ def harvest_prepare_timesheet(entries: str, user_id: int = 0) -> str:
 
 
 # ======================================================================
-# TOOL 9: Commit timesheet (draft -> Harvest)
+# TOOL 11: Commit timesheet (draft -> Harvest)
 # ======================================================================
 
 @mcp.tool()
@@ -1141,7 +1234,7 @@ def harvest_commit_timesheet(draft_id: str) -> str:
 
 
 # ======================================================================
-# TOOL 10: Uppdatera tidspost
+# TOOL 12: Uppdatera tidspost
 # ======================================================================
 
 @mcp.tool()
@@ -1192,7 +1285,7 @@ def harvest_update_time_entry(
 
 
 # ======================================================================
-# TOOL 11: Ta bort tidspost
+# TOOL 13: Ta bort tidspost
 # ======================================================================
 
 @mcp.tool()
@@ -1213,7 +1306,7 @@ def harvest_delete_time_entry(entry_id: int) -> str:
 
 
 # ======================================================================
-# TOOL 12: Self-update från GitHub
+# TOOL 14: Self-update från GitHub
 # ======================================================================
 
 # Projektrot (där detta repo bor)

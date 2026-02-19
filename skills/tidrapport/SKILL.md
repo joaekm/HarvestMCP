@@ -45,7 +45,7 @@ LLM:en FAR INTE:
 
 - Anropa `parse_relative_date("denna vecka")` for att fa veckans man-fre
 - Om anvandaren anger en annan vecka, anvand den istallet
-- Anropa `harvest_list_users()` och identifiera inloggad anvandare (Joakim Ekman) -> user_id
+- Anropa `harvest_find_user("Joakim Ekman")` for att hamta user_id
 - Spara: user_id, from_date (mandag), to_date (fredag)
 
 ### Steg 1: Kolla befintliga poster

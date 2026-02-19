@@ -164,6 +164,14 @@ class HarvestClient:
         data = self._request('GET', '/reports/uninvoiced', params=params)
         return data.get('results', [])
 
+    def get_roles(self) -> list:
+        """Hämta alla roller. Kräver administrator-behörighet."""
+        return self._paginate('/roles', result_key='roles')
+
+    def get_role(self, role_id: int) -> dict:
+        """Hämta en specifik roll med user_ids."""
+        return self._request('GET', f'/roles/{role_id}')
+
     def get_task_assignments(self, project_id: int) -> list:
         """Hämta tillgängliga tasks för ett projekt."""
         return self._paginate(

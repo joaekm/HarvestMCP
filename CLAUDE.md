@@ -90,6 +90,13 @@ python3 harvest_mcp.py
 |---------|-------------|-----------------|
 | harvest_detailed_time_entries | Enskilda tidsposter med entry_id och kommentarer | HOG — anvand filter + max_rows |
 
+### Team/roller
+
+| Verktyg | Beskrivning | Context-kostnad |
+|---------|-------------|-----------------|
+| harvest_list_teams | Lista alla team (roller) med antal medlemmar | Lag (en rad/roll) |
+| harvest_get_team | Sok team pa namn, visa medlemmar med ID/namn/kapacitet | Lag-medel |
+
 ### Lookup (anvand find-verktygen forst!)
 
 | Verktyg | Beskrivning | Context-kostnad |

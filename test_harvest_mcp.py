@@ -99,7 +99,7 @@ def _make_team_report_entry(user_id=1, user_name="Anna Andersson", billable_hour
     }
 
 
-def _make_user(user_id=1, first_name="Anna", last_name="Andersson", weekly_capacity_h=40):
+def _make_user(user_id=1, first_name="Anna", last_name="Andersson", weekly_capacity_h=40, is_active=True):
     return {
         'id': user_id,
         'first_name': first_name,
@@ -107,6 +107,17 @@ def _make_user(user_id=1, first_name="Anna", last_name="Andersson", weekly_capac
         'weekly_capacity': weekly_capacity_h * 3600,
         'roles': ['Member'],
         'is_contractor': False,
+        'is_active': is_active,
+    }
+
+
+def _make_role(role_id=1, name="Team Alpha", user_ids=None):
+    return {
+        'id': role_id,
+        'name': name,
+        'user_ids': user_ids or [],
+        'created_at': '2026-01-01T00:00:00Z',
+        'updated_at': '2026-01-01T00:00:00Z',
     }
 
 
@@ -818,6 +829,101 @@ class TestHarvestGetProjectTasks:
         mock_harvest_client.get_task_assignments.return_value = []
         result = harvest_mcp.harvest_get_project_tasks(999)
         assert "Inga tasks" in result
+
+
+class TestHarvestListTeams:
+    def test_basic(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(1, "Team Drive", [101, 102, 103]),
+            _make_role(2, "Team AI", [201, 202]),
+        ]
+        result = harvest_mcp.harvest_list_teams()
+        assert "2 st" in result
+        assert "Team Drive" in result
+        assert "Team AI" in result
+        assert "| 3 |" in result  # 3 members in Team Drive
+        assert "| 2 |" in result  # 2 members in Team AI
+
+    def test_empty(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = []
+        result = harvest_mcp.harvest_list_teams()
+        assert "Inga roller" in result
+
+    def test_sorted_by_name(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(2, "Zebra Team", [1]),
+            _make_role(1, "Alpha Team", [1]),
+        ]
+        result = harvest_mcp.harvest_list_teams()
+        alpha_pos = result.index("Alpha Team")
+        zebra_pos = result.index("Zebra Team")
+        assert alpha_pos < zebra_pos
+
+
+class TestHarvestGetTeam:
+    def test_match(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(1, "Team Drive (Drive Unit)", [101, 102]),
+            _make_role(2, "Team AI (AI Unit)", [201]),
+        ]
+        mock_harvest_client.get_users.side_effect = [
+            # First call: active users
+            [_make_user(101, "Anna", "A"), _make_user(102, "Bo", "B")],
+            # Second call: inactive users
+            [],
+        ]
+        result = harvest_mcp.harvest_get_team("drive")
+        assert "Team Drive" in result
+        assert "Anna" in result
+        assert "Bo" in result
+        assert "Team AI" not in result
+
+    def test_no_match(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(1, "Team Drive", [101]),
+        ]
+        result = harvest_mcp.harvest_get_team("xyz")
+        assert "Inget team matchade" in result
+
+    def test_shows_inactive_users(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(1, "Team Drive", [101, 102]),
+        ]
+        mock_harvest_client.get_users.side_effect = [
+            # Active users
+            [_make_user(101, "Anna", "A", is_active=True)],
+            # Inactive users
+            [_make_user(102, "Bo", "B", is_active=False)],
+        ]
+        result = harvest_mcp.harvest_get_team("drive")
+        assert "Anna" in result
+        assert "Bo" in result
+        assert "Nej" in result  # Bo is inactive
+
+    def test_unknown_user_id(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(1, "Team Drive", [101, 999]),
+        ]
+        mock_harvest_client.get_users.side_effect = [
+            [_make_user(101, "Anna", "A")],
+            [],
+        ]
+        result = harvest_mcp.harvest_get_team("drive")
+        assert "Anna" in result
+        assert "(okand)" in result
+
+    def test_multiple_matches(self, mock_harvest_client):
+        mock_harvest_client.get_roles.return_value = [
+            _make_role(1, "Team Alpha", [101]),
+            _make_role(2, "Team Omega", [201]),
+        ]
+        mock_harvest_client.get_users.side_effect = [
+            [_make_user(101, "Anna", "A"), _make_user(201, "Bo", "B")],
+            [],
+        ]
+        result = harvest_mcp.harvest_get_team("team")
+        assert "Team Alpha" in result
+        assert "Team Omega" in result
 
 
 class TestHarvestPrepareTimesheet:
