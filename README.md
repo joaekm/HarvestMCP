@@ -17,10 +17,16 @@ Tryck `Cmd + Mellanslag`, skriv **Terminal** och tryck Enter. Ett svart/vitt fö
 
 **2. Kör installationen**
 
-Öppna mappen du fått (t.ex. via mail eller Slack) och lägg den på Skrivbordet. Kör sedan i terminalen:
+Ladda ner repot som ZIP från GitHub:
+
+1. Gå till repot på GitHub
+2. Klicka på den gröna knappen **Code** → **Download ZIP**
+3. Packa upp ZIP-filen på Skrivbordet (dubbelklicka på filen)
+
+Kör sedan i terminalen:
 
 ```bash
-cd ~/Desktop/HarvestMCP
+cd ~/Desktop/HarvestMCP-main
 ./install.sh
 ```
 
