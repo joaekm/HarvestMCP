@@ -21,12 +21,27 @@ Ladda ner repot som ZIP från GitHub:
 
 1. Gå till repot på GitHub
 2. Klicka på den gröna knappen **Code** → **Download ZIP**
-3. Packa upp ZIP-filen på Skrivbordet (dubbelklicka på filen)
+3. Packa upp ZIP-filen och flytta mappen till en valfri plats, till exempel:
 
-Kör sedan i terminalen:
+| Alternativ | Sökväg | Beskrivning |
+|------------|--------|-------------|
+| **A** | `~/MCP/HarvestMCP` | Dedikerad MCP-mapp — bra om du har flera MCP-servrar |
+| **B** | `~/HarvestMCP` | Direkt i hemkatalogen — enklast möjligt |
+| **C** | `~/Library/HarvestMCP` | macOS-konvention — dold i Finder, ur vägen |
+
+> **Tips:** Den uppackade mappen heter `HarvestMCP-main` — byt gärna namn till `HarvestMCP`.
+
+Skapa mappen (om den inte finns) och flytta dit. Exempel med alternativ A:
 
 ```bash
-cd ~/Desktop/HarvestMCP-main
+mkdir -p ~/MCP
+mv ~/Downloads/HarvestMCP-main ~/MCP/HarvestMCP
+```
+
+Kör sedan installationen:
+
+```bash
+cd ~/MCP/HarvestMCP
 ./install.sh
 ```
 
