@@ -38,14 +38,44 @@ mkdir -p ~/MCP
 mv ~/Downloads/HarvestMCP-main ~/MCP/HarvestMCP
 ```
 
-Kör sedan installationen:
+**3. Skapa config.yaml**
+
+Filen `config.yaml` följer inte med i ZIP-nedladdningen. Skapa den i HarvestMCP-mappen:
+
+```bash
+cat > config.yaml << 'EOF'
+# HarvestMCP Configuration
+
+harvest:
+  client_id: "4npFjmvY_YXMzygxlyZA4KFG"
+  client_secret: "YjQFZrEyxJFTzT-U1x0Dl9TsY0TDex8kmxW1JwYuUbxsh4BcXnu-Jzc2zkZ0UfTxTqnlNfD0TGlk-pIBedrGVw"
+  redirect_uri: "http://localhost:8080/callback"
+  token_path: "~/.harvest/token.json"
+  authorize_url: "https://id.getharvest.com/oauth2/authorize"
+  token_url: "https://id.getharvest.com/api/v2/oauth2/token"
+  api_base_url: "https://api.harvestapp.com/v2"
+  user_agent: "HarvestMCP (joakim.ekman@digitalist.se)"
+
+forecast:
+  client_id: "4npFjmvY_YXMzygxlyZA4KFG"
+  client_secret: "YjQFZrEyxJFTzT-U1x0Dl9TsY0TDex8kmxW1JwYuUbxsh4BcXnu-Jzc2zkZ0UfTxTqnlNfD0TGlk-pIBedrGVw"
+  redirect_uri: "http://localhost:8080/callback"
+  token_path: "~/.harvest/forecast_token.json"
+  authorize_url: "https://id.getharvest.com/oauth2/authorize"
+  token_url: "https://id.getharvest.com/api/v2/oauth2/token"
+  api_base_url: "https://api.forecastapp.com"
+  user_agent: "HarvestMCP (joakim.ekman@digitalist.se)"
+EOF
+```
+
+**4. Kör installationen**
 
 ```bash
 cd ~/MCP/HarvestMCP
 ./install.sh
 ```
 
-**3. Logga in på Harvest**
+**5. Logga in på Harvest**
 
 Installationsskriptet öppnar din webbläsare automatiskt — **två gånger**:
 
@@ -54,7 +84,7 @@ Installationsskriptet öppnar din webbläsare automatiskt — **två gånger**:
 
 Gå tillbaka till terminalen och tryck Enter mellan varje steg när skriptet ber om det.
 
-**4. Starta om Claude Desktop**
+**6. Starta om Claude Desktop**
 
 Skriptet registrerar HarvestMCP automatiskt i Claude Desktop. Men du måste **stänga och öppna Claude Desktop** för att det ska börja fungera:
 
